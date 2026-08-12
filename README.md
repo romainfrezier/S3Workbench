@@ -120,13 +120,10 @@ The integration environment is isolated, pinned by container digest, and removed
 
 ## Project status
 
-S3Workbench is an early public release. The main next steps are:
-
-- bucket-scoped connections for credentials without `ListAllMyBuckets`;
-- live-provider conformance suites;
-- Developer ID signing and notarization;
-- resumable/background transfers across application termination;
-- multipart copy for moves above 5 GiB.
+S3Workbench is an early public release. The current product priority is fast,
+cancellable recursive search with clear, non-blocking loading states. See the
+[product roadmap](ROADMAP.md) for priorities, acceptance criteria, and explicit
+non-goals.
 
 ## Contributing
 
