@@ -53,6 +53,15 @@ product priority is a real recursive search below the current prefix.
   query context becomes stale. Late pages from an old scan must not change the
   current results.
 
+### Small P0 usability task
+
+- Add native ascending/descending sorting to the object table for the columns
+  already shown: Name, Size, Modified, and Storage class.
+- Sort the objects currently loaded in the table locally; do not add another S3
+  request, client-side search index, or hidden second pagination model.
+- Keep prefixes and missing values predictable, and preserve the current
+  selection while the order changes.
+
 ### Loading and error states
 
 - Delay visible loading indicators by 200 ms to avoid flashing for fast calls.
@@ -99,6 +108,8 @@ Confirmation dialogs for delete, replace, and move remain factual.
 - A restricted `/bucket/prefix` connection never scans outside that root.
 - Refresh and failed refresh keep existing rows visible.
 - Quick Look, object actions, and **Reveal in Prefix** work from search results.
+- Column sorting works in both directions, remains local to the loaded rows, and
+  does not change the active search, pagination token, or selected objects.
 - Manual macOS verification covers the 200 ms delay, keyboard operation,
   VoiceOver announcements, cancellation, retry, and non-blocking banners.
 
