@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions and ideas
+    url: https://github.com/romainfrezier/S3Workbench/discussions
+    about: Ask for help or discuss ideas before filing an actionable issue.
+  - name: Security vulnerability
+    url: https://github.com/romainfrezier/S3Workbench/security/advisories/new
+    about: Report security issues privately.
+

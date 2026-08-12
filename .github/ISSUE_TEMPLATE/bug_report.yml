@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible S3Workbench problem
+title: "[Bug]: "
+labels: [bug, triage]
+body:
+  - type: checkboxes
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, signatures, presigned URLs, private endpoints, and sensitive object names.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+  - type: input
+    attributes:
+      label: S3Workbench version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: macOS version and Mac model
+      placeholder: macOS 26.0, MacBook Pro M4
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Provider
+      options:
+        - MinIO
+        - AWS S3
+        - Cloudflare R2
+        - Wasabi
+        - Backblaze B2
+        - Other S3-compatible provider
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Addressing style
+      options: [Automatic, Path-style, Virtual-hosted-style]
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include reproducible steps, expected behavior, and the sanitized error message.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Additional context
+      description: Sanitized screenshots or logs only. Never attach credentials or signed URLs.
