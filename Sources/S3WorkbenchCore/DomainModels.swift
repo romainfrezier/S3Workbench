@@ -16,6 +16,8 @@ public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
     public var id: UUID
     public var name: String
     public var endpoint: URL
+    public var accessPath: String?
+    public var colorHex: String?
     public var region: String
     public var addressingStyle: S3AddressingStyle
     public var tlsVerification: TLSVerification
@@ -25,6 +27,8 @@ public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
         id: UUID = UUID(),
         name: String,
         endpoint: URL,
+        accessPath: String? = nil,
+        colorHex: String? = nil,
         region: String = "us-east-1",
         addressingStyle: S3AddressingStyle = .automatic,
         tlsVerification: TLSVerification = .systemDefault,
@@ -33,6 +37,8 @@ public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
         self.id = id
         self.name = name
         self.endpoint = endpoint
+        self.accessPath = accessPath
+        self.colorHex = colorHex
         self.region = region
         self.addressingStyle = addressingStyle
         self.tlsVerification = tlsVerification
@@ -51,6 +57,17 @@ public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
         guard endpoint.user == nil, endpoint.password == nil, endpoint.query == nil, endpoint.fragment == nil else {
             throw S3ServiceError.invalidConfiguration("Endpoint cannot contain credentials, a query, or a fragment.")
         }
+        let accessPath = accessPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let accessPath, !accessPath.isEmpty {
+            guard try resolvedAccessPath() != nil else {
+                throw S3ServiceError.invalidConfiguration("Access path must contain a bucket name.")
+            }
+        }
+        if let colorHex {
+            guard colorHex.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil else {
+                throw S3ServiceError.invalidConfiguration("Connection color must use #RRGGBB format.")
+            }
+        }
         guard !trimmedRegion.isEmpty,
               trimmedRegion.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0) }) else {
             throw S3ServiceError.invalidConfiguration("Region contains unsupported characters.")
@@ -63,7 +80,26 @@ public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
         var copy = self
         copy.name = trimmedName
         copy.region = trimmedRegion
+        copy.accessPath = accessPath?.isEmpty == false ? accessPath : nil
+        copy.colorHex = colorHex?.uppercased()
         return copy
+    }
+
+    public func resolvedAccessPath() throws -> (bucket: String, prefix: String)? {
+        guard var path = accessPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty else { return nil }
+        while path.first == "/" { path.removeFirst() }
+        guard !path.isEmpty else {
+            throw S3ServiceError.invalidConfiguration("Access path must contain a bucket name.")
+        }
+        let parts = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        let bucket = String(parts[0])
+        guard !bucket.isEmpty else {
+            throw S3ServiceError.invalidConfiguration("Access path must contain a bucket name.")
+        }
+        var prefix = parts.count == 2 ? String(parts[1]) : ""
+        if !prefix.isEmpty, !prefix.hasSuffix("/") { prefix += "/" }
+        return (bucket, prefix)
     }
 }
 

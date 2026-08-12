@@ -33,6 +33,9 @@ final class WorkbenchViewModel {
     connections.first { $0.id == selectedConnectionID }
   }
 
+  var accessRoot: (bucket: String, prefix: String)? { selectedConnection?.initialLocation }
+  var accessRootPrefix: String { accessRoot?.prefix ?? "" }
+
   var selectedObjects: [ObjectRow] {
     objects.filter { selectedObjectIDs.contains($0.id) }
   }
@@ -47,7 +50,9 @@ final class WorkbenchViewModel {
       connectionID: selectedConnectionID, bucket: selectedBucket, prefix: prefix)
   }
 
-  var canGoBack: Bool { selectedBucket != nil || historyIndex > 0 }
+  var canGoBack: Bool {
+    accessRoot != nil ? historyIndex > 0 : selectedBucket != nil || historyIndex > 0
+  }
   var canGoForward: Bool { historyIndex + 1 < history.count }
 
   func start() async {
@@ -70,6 +75,14 @@ final class WorkbenchViewModel {
       buckets = []
       return
     }
+    if let accessRoot {
+      buckets = []
+      selectedBucket = accessRoot.bucket
+      prefix = accessRoot.prefix
+      history = [accessRoot.prefix]
+      await reloadObjects()
+      return
+    }
     await perform {
       buckets = try await service.listBuckets(connectionID: selectedConnectionID)
     }
@@ -90,6 +103,14 @@ final class WorkbenchViewModel {
   }
 
   func navigateToRoot() async {
+    if let accessRoot {
+      selectedBucket = accessRoot.bucket
+      prefix = accessRoot.prefix
+      history = [accessRoot.prefix]
+      historyIndex = 0
+      await reloadObjects()
+      return
+    }
     selectedBucket = nil
     prefix = ""
     objects = []
@@ -190,6 +211,15 @@ final class WorkbenchViewModel {
         selectedConnectionID = connections.first?.id
         await reloadConnection()
       }
+    }
+  }
+
+  func duplicateConnection(_ connection: ConnectionRow) async {
+    await perform {
+      let copy = try await service.duplicateConnection(id: connection.id)
+      connections.append(copy)
+      connections.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+      selectedConnectionID = copy.id
     }
   }
 

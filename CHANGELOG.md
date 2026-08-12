@@ -2,6 +2,15 @@
 
 All notable changes to S3Workbench are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-08-12
+
+### Added
+
+- Separate server, HTTPS, and port fields, with port 443 as the default.
+- Optional direct `/bucket/prefix` access roots for restricted S3 credentials that cannot list every bucket.
+- Native connection colors and one-click connection duplication, including Keychain credentials.
+- A roomier native bucket list with clearer names and creation dates.
+
 ## [0.1.0] - 2026-08-12
 
 ### Added
@@ -18,3 +27,4 @@ All notable changes to S3Workbench are documented here. The project follows [Sem
 - A safe-area-correct app icon designed for the Liquid Glass visual language.
 
 [0.1.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.1.0
+[0.2.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.2.0

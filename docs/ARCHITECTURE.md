@@ -14,6 +14,8 @@ The MVP uses the AWS SDK for Swift behind `S3Service`. The generated S3 client a
 Compatibility settings are explicit:
 
 - every profile has its own endpoint and signing region;
+- the editor builds the endpoint from a server, HTTPS setting, and port rather than accepting credentials or a protocol in the server field;
+- an optional `/bucket/prefix` access path bypasses global bucket listing and becomes the connection's navigation root;
 - addressing can be path, virtual-hosted, or automatic;
 - automatic addressing uses compatibility-first path style for arbitrary endpoints; users can explicitly select virtual-hosted style when their DNS and certificates support it;
 - optional request checksums are not forced, avoiding `aws-chunked` on providers that do not accept it;
@@ -24,7 +26,7 @@ The adapter is narrow enough to replace its transport or add a compatibility fal
 
 ## Persistence and security
 
-Connection names, endpoints, region, addressing policy, and TLS policy are JSON metadata in Application Support. Access and secret keys are generic-password Keychain items keyed by an opaque connection UUID. Logging uses redacted domain errors and must never include authorization headers, secrets, or presigned query strings.
+Connection names, endpoints, direct access paths, region, addressing policy, and TLS policy are JSON metadata in Application Support. Access and secret keys are generic-password Keychain items keyed by an opaque connection UUID. Logging uses redacted domain errors and must never include authorization headers, secrets, or presigned query strings.
 
 System TLS trust is the default. A custom PEM CA can be scoped to one connection. Disabling verification is intentionally unsupported and fails closed. HTTP endpoints are allowed because local and private S3 deployments are a core use case, with a visible warning in the connection editor.
 

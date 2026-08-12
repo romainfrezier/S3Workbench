@@ -123,10 +123,12 @@ struct WorkbenchRootView: View {
             }
           } icon: {
             Image(systemName: "externaldrive.connected.to.line.below")
+              .foregroundStyle(connection.color)
           }
           .tag(connection.id)
           .contextMenu {
             Button("Edit…") { connectionDraft = ConnectionDraft(connection: connection) }
+            Button("Duplicate") { Task { await model.duplicateConnection(connection) } }
             Divider()
             Button("Delete", role: .destructive) {
               connectionToDelete = connection
@@ -275,28 +277,39 @@ private struct BucketBrowserView: View {
   @State private var selection = Set<BucketRow.ID>()
 
   var body: some View {
-    Table(model.buckets, selection: $selection) {
-      TableColumn("Bucket") { bucket in
-        Label(bucket.name, systemImage: "shippingbox")
-          .contentShape(.rect)
-          .onTapGesture(count: 2) { Task { await model.openBucket(bucket.name) } }
-      }
-      TableColumn("Created") { bucket in
+    List(model.buckets, selection: $selection) { bucket in
+      HStack(spacing: 12) {
+        Image(systemName: "shippingbox.fill")
+          .font(.title2)
+          .foregroundStyle(.tint)
+          .frame(width: 30)
+        VStack(alignment: .leading, spacing: 3) {
+          Text(bucket.name).font(.body.weight(.medium))
+          Text("Bucket").font(.caption).foregroundStyle(.secondary)
+        }
+        Spacer(minLength: 24)
         if let date = bucket.creationDate {
-          Text(date, format: .dateTime.year().month().day().hour().minute())
-        } else {
-          Text("—").foregroundStyle(.tertiary)
+          VStack(alignment: .trailing, spacing: 3) {
+            Text("Created").font(.caption).foregroundStyle(.secondary)
+            Text(date, format: .dateTime.year().month().day().hour().minute())
+              .foregroundStyle(.secondary)
+          }
         }
       }
+      .padding(.vertical, 8)
+      .contentShape(.rect)
+      .tag(bucket.id)
+      .onTapGesture(count: 2) { Task { await model.openBucket(bucket.name) } }
+      .contextMenu {
+        Button("Open") { Task { await model.openBucket(bucket.name) } }
+      }
     }
-    .contextMenu(forSelectionType: BucketRow.ID.self) { selected in
-      if selected.count == 1, let name = selected.first {
-        Button("Open") { Task { await model.openBucket(name) } }
-      }
-    } primaryAction: { selected in
-      if selected.count == 1, let name = selected.first {
+    .onKeyPress(.return) {
+      if selection.count == 1, let name = selection.first {
         Task { await model.openBucket(name) }
+        return .handled
       }
+      return .ignored
     }
     .navigationTitle(model.selectedConnection?.name ?? "Buckets")
     .overlay {
@@ -449,7 +462,7 @@ private struct BreadcrumbView: View {
       if let bucket = model.selectedBucket {
         Button(bucket) {
           Task {
-            model.navigate(to: "")
+            model.navigate(to: model.accessRootPrefix)
             await model.reloadObjects()
           }
         }
@@ -457,7 +470,8 @@ private struct BreadcrumbView: View {
         ForEach(prefixComponents.indices, id: \.self) { index in
           Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
           Button(prefixComponents[index]) {
-            let destination = prefixComponents.prefix(index + 1).joined(separator: "/") + "/"
+            let destination = model.accessRootPrefix
+              + prefixComponents.prefix(index + 1).joined(separator: "/") + "/"
             Task {
               model.navigate(to: destination)
               await model.reloadObjects()
@@ -474,7 +488,8 @@ private struct BreadcrumbView: View {
   }
 
   private var prefixComponents: [String] {
-    model.prefix.split(separator: "/").map(String.init)
+    String(model.prefix.dropFirst(model.accessRootPrefix.count))
+      .split(separator: "/").map(String.init)
   }
 }
 

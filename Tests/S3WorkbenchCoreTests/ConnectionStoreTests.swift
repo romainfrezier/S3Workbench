@@ -19,6 +19,8 @@ import Testing
         id: UUID(),
         name: "Private storage",
         endpoint: try #require(URL(string: "https://storage.example.com:9443")),
+        accessPath: "/documents/reports",
+        colorHex: "#FF9500",
         region: "custom-1",
         addressingStyle: .virtualHosted
     )
@@ -30,6 +32,39 @@ import Testing
     let reloaded = try await reader.load()
     #expect(reloaded == [first, second])
     #expect(reloaded.map(\.endpoint) == [first.endpoint, second.endpoint])
+    #expect(reloaded[1].accessPath == "/documents/reports")
+    #expect(reloaded[1].colorHex == "#FF9500")
+}
+
+@Test func accessPathResolvesBucketAndPrefix() throws {
+    let profile = try ConnectionProfile(
+        name: "Restricted account",
+        endpoint: try #require(URL(string: "https://storage.example.com:443")),
+        accessPath: " /etickets/incoming "
+    ).validated()
+
+    let location = try #require(try profile.resolvedAccessPath())
+    #expect(location.bucket == "etickets")
+    #expect(location.prefix == "incoming/")
+    #expect(profile.accessPath == "/etickets/incoming")
+}
+
+@Test func profilesSavedBeforeAccessPathsAndColorsStillDecode() throws {
+    let profile = ConnectionProfile(
+        name: "Legacy",
+        endpoint: try #require(URL(string: "https://storage.example.com"))
+    )
+    let encoded = try JSONEncoder().encode(profile)
+    var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    object.removeValue(forKey: "accessPath")
+    object.removeValue(forKey: "colorHex")
+
+    let decoded = try JSONDecoder().decode(
+        ConnectionProfile.self,
+        from: JSONSerialization.data(withJSONObject: object)
+    )
+    #expect(decoded.accessPath == nil)
+    #expect(decoded.colorHex == nil)
 }
 
 @Test func customCertificateConnectionMetadataReloads() async throws {

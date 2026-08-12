@@ -18,8 +18,14 @@ struct ConnectionEditorView: View {
         Form {
         Section("Connection") {
           TextField("Name", text: $draft.name, prompt: Text("Local MinIO"))
-          TextField("Endpoint URL", text: $draft.endpoint, prompt: Text("http://localhost:9000"))
-            .textContentType(.URL)
+          ColorPicker("Color", selection: colorBinding, supportsOpacity: false)
+          TextField("Server", text: $draft.server, prompt: Text("storage.example.com"))
+          TextField("Port", text: $draft.port, prompt: Text("443"))
+          Toggle("Use HTTPS", isOn: $draft.usesHTTPS)
+          TextField("Access path", text: $draft.accessPath, prompt: Text("/bucket/prefix"))
+          Text("Enter only the server name. The optional access path opens a bucket or prefix directly, without listing every bucket first.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
           TextField("Region", text: $draft.region)
           Picker("Addressing", selection: $draft.addressingMode) {
             ForEach(AddressingMode.allCases) { Text($0.rawValue).tag($0) }
@@ -42,7 +48,7 @@ struct ConnectionEditorView: View {
         }
 
         Section("TLS") {
-          if URL(string: draft.endpoint)?.scheme?.lowercased() == "http" {
+          if !draft.usesHTTPS {
             Label(
               "HTTP sends credentials and object data without transport encryption. Use it only on a trusted local network.",
               systemImage: "exclamationmark.triangle.fill"
@@ -114,7 +120,12 @@ struct ConnectionEditorView: View {
       }
       .navigationTitle(draft.isExisting ? "Edit Connection" : "New Connection")
     }
-    .frame(width: 540, height: 590)
+    .frame(width: 560, height: 660)
+    .onChange(of: draft.usesHTTPS) { wasHTTPS, usesHTTPS in
+      if wasHTTPS, !usesHTTPS, draft.port == "443" { draft.port = "80" }
+      if !wasHTTPS, usesHTTPS, draft.port == "80" { draft.port = "443" }
+      testResult = nil
+    }
     .fileImporter(isPresented: $isChoosingCA, allowedContentTypes: [.x509Certificate]) { result in
       if case .success(let url) = result { draft.customCAURL = url }
     }
@@ -135,5 +146,12 @@ struct ConnectionEditorView: View {
     isSaving = true
     defer { isSaving = false }
     if await save(draft) { dismiss() }
+  }
+
+  private var colorBinding: Binding<Color> {
+    Binding(
+      get: { Color(connectionHex: draft.colorHex) },
+      set: { draft.colorHex = $0.connectionHex }
+    )
   }
 }

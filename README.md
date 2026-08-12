@@ -25,7 +25,9 @@
 Most desktop S3 tools either assume AWS endpoints or feel like generic file-transfer utilities. S3Workbench is built for people who move between local MinIO, private infrastructure, and hosted object storage every day.
 
 - Save and switch between multiple independent storage connections.
-- Use arbitrary endpoints such as `http://localhost:9000` or `https://storage.example.com:9443`.
+- Color-code and duplicate saved connections.
+- Configure arbitrary servers without embedding a protocol, plus HTTPS, port, region, and addressing settings.
+- Open an optional `/bucket/prefix` access path directly when credentials cannot list every bucket.
 - Browse buckets and prefixes with native macOS tables, navigation, search, inspector, keyboard commands, and Quick Look.
 - Upload, stream downloads, delete, move, drag and drop, inspect metadata, and create presigned URLs.
 - Track transfers with progress, cancellation, retry, and bounded-memory multipart uploads.
@@ -59,13 +61,17 @@ The current community build is ad-hoc signed because no Developer ID identity is
 Each saved connection contains:
 
 - a display name;
-- an absolute HTTP or HTTPS endpoint;
+- a server name, HTTPS setting, and port (`443` by default);
+- an optional direct access path such as `/etickets` or `/bucket/prefix`;
+- a sidebar color;
 - a signing region;
 - path-style, virtual-hosted-style, or automatic addressing;
 - system trust or a connection-scoped custom CA certificate;
 - an access key and secret access key stored under an opaque connection UUID in macOS Keychain.
 
 Automatic addressing is compatibility-first and prefers path-style for arbitrary endpoints. Explicit virtual-hosted style remains available when DNS and certificates cover bucket subdomains.
+
+When an access path is configured, S3Workbench tests and opens that bucket/prefix directly instead of requiring `ListAllMyBuckets`. This supports credentials intentionally restricted to one remote root.
 
 ## Security
 

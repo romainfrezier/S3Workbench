@@ -70,7 +70,16 @@ public actor AWSS3Service: S3Service {
     }
 
     public func testConnection() async throws -> ConnectionTestResult {
-        ConnectionTestResult(bucketCount: try await listBuckets().count)
+        if let accessPath = try profile.resolvedAccessPath() {
+            _ = try await listObjects(
+                bucket: accessPath.bucket,
+                prefix: accessPath.prefix,
+                continuationToken: nil,
+                pageSize: 1
+            )
+            return ConnectionTestResult(bucketCount: 1)
+        }
+        return ConnectionTestResult(bucketCount: try await listBuckets().count)
     }
 
     public func listBuckets() async throws -> [S3Bucket] {

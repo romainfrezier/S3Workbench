@@ -64,6 +64,18 @@ import Testing
             )
         }
 
+        let directService = try AWSS3Service(
+            profile: ConnectionProfile(
+                name: "Direct path MinIO",
+                endpoint: fixture.profile.endpoint,
+                accessPath: "/\(fixture.bucket)/\(runPrefix)",
+                region: fixture.profile.region,
+                addressingStyle: .path
+            ),
+            credentials: fixture.credentials
+        )
+        #expect(try await directService.testConnection().bucketCount == 1)
+
         let rootPage = try await service.listObjects(
             bucket: fixture.bucket,
             prefix: runPrefix,

@@ -82,6 +82,38 @@ actor CoreWorkbenchService: WorkbenchServing {
     return ConnectionRow(profile)
   }
 
+  func duplicateConnection(id: UUID) async throws -> ConnectionRow {
+    let profiles = try await connectionStore.load()
+    guard var copy = profiles.first(where: { $0.id == id }) else {
+      throw S3ServiceError.notFound
+    }
+    guard let credentials = try credentialStore.credentials(for: id) else {
+      throw S3ServiceError.invalidConfiguration("No credentials are stored for this connection.")
+    }
+    copy.id = UUID()
+    let baseName = "\(copy.name) Copy"
+    copy.name = baseName
+    var suffix = 2
+    while profiles.contains(where: { $0.name == copy.name }) {
+      copy.name = "\(baseName) \(suffix)"
+      suffix += 1
+    }
+    if let certificate = copy.customCACertificateURL {
+      copy.customCACertificateURL = try persistCACertificate(certificate, connectionID: copy.id)
+    }
+    do {
+      try credentialStore.save(credentials, for: copy.id)
+      _ = try await connectionStore.upsert(copy)
+    } catch {
+      try? credentialStore.remove(for: copy.id)
+      if let certificate = copy.customCACertificateURL, isManagedCertificate(certificate) {
+        try? FileManager.default.removeItem(at: certificate)
+      }
+      throw error
+    }
+    return ConnectionRow(copy)
+  }
+
   func removeConnection(id: UUID) async throws {
     let certificateURL = try await connectionStore.load().first { $0.id == id }?
       .customCACertificateURL
@@ -487,6 +519,8 @@ extension ConnectionRow {
       id: profile.id,
       name: profile.name,
       endpoint: profile.endpoint,
+      accessPath: profile.accessPath,
+      colorHex: profile.colorHex ?? "#0A84FF",
       region: profile.region,
       addressingMode: addressingMode,
       tlsPolicy: tlsPolicy,
@@ -497,7 +531,7 @@ extension ConnectionRow {
 
 extension ConnectionDraft {
   fileprivate func profile() throws -> ConnectionProfile {
-    guard validationMessage == nil, let endpoint = URL(string: endpoint) else {
+    guard validationMessage == nil, let endpoint = endpointURL else {
       throw S3ServiceError.invalidConfiguration(
         validationMessage ?? "The connection settings are invalid.")
     }
@@ -517,6 +551,9 @@ extension ConnectionDraft {
       id: id,
       name: name,
       endpoint: endpoint,
+      accessPath: accessPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ? nil : accessPath.trimmingCharacters(in: .whitespacesAndNewlines),
+      colorHex: colorHex,
       region: region,
       addressingStyle: addressingStyle,
       tlsVerification: tlsVerification,
