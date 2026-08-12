@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -19,8 +20,39 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Environment
-        run: swift --version
+        id: environment
+        run: |
+          swift --version
+          echo "xcode=$(xcodebuild -version | tr '\n' '-')" >> "$GITHUB_OUTPUT"
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            .build/repositories
+            .build/checkouts
+          key: swiftpm-${{ runner.os }}-${{ steps.environment.outputs.xcode }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ steps.environment.outputs.xcode }}-
+      - name: Test
+        run: swift test
       - name: Test Release build
+        if: startsWith(github.ref, 'refs/tags/')
         run: swift test -c release
+      - name: Build and verify release DMG
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          MARKETING_VERSION: ${{ github.ref_name }}
+          LAUNCH_TEST: 1
+        run: |
+          export MARKETING_VERSION="${MARKETING_VERSION#v}"
+          scripts/package-dmg.sh
+          scripts/verify-dmg.sh
+      - name: Upload release DMG
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v7
+        with:
+          name: S3Workbench-${{ github.ref_name }}-arm64
+          path: dist/S3Workbench.dmg
+          if-no-files-found: error

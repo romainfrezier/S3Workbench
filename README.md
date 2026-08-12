@@ -30,6 +30,7 @@ Most desktop S3 tools either assume AWS endpoints or feel like generic file-tran
 - Open an optional `/bucket/prefix` access path directly when credentials cannot list every bucket.
 - Browse buckets and prefixes with native macOS tables, navigation, search, inspector, keyboard commands, and Quick Look.
 - Upload, stream downloads, delete, move, drag and drop, inspect metadata, and create presigned URLs.
+- Choose Keep Both, Replace, or Cancel before a transfer or move can overwrite a destination.
 - Track transfers with progress, cancellation, retry, and bounded-memory multipart uploads.
 - Keep credentials out of configuration files and logs.
 
@@ -115,7 +116,7 @@ scripts/package-dmg.sh
 LAUNCH_TEST=1 scripts/verify-dmg.sh
 ```
 
-The integration environment is isolated, pinned by container digest, and removed on exit. It covers authentication, buckets, prefixes, pagination, unusual object names, metadata, upload/download/delete/move, presigned GET, and multipart upload with SHA-256 verification. See [Testing](docs/TESTING.md).
+The integration environment is isolated, pinned by container digest, and removed on exit. It covers authentication, restricted bucket permissions, direct access roots, buckets, prefixes, pagination, unusual object names, metadata, upload/download/delete/move, presigned GET, and multipart upload with SHA-256 verification. See [Testing](docs/TESTING.md).
 
 ## Project status
 

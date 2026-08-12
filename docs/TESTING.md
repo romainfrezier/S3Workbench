@@ -16,7 +16,9 @@ scripts/integration-test.sh
 
 The script starts an isolated Docker Compose project, creates the test bucket, exports the `S3_TEST_*` variables used by the Swift integration tests, runs `swift test`, then performs an independent MinIO smoke check. It removes its containers and volume on exit. Set `KEEP_MINIO=1` to leave the environment running for manual testing.
 
-The pinned Linux arm64 images are MinIO `RELEASE.2025-09-07T16-13-09Z` and mc `RELEASE.2025-08-13T08-35-41Z`. The test endpoint is `http://127.0.0.1:19000`, uses Signature V4 and path-style addressing, and intentionally exercises a custom non-TLS endpoint. Override the ports or credentials through `MINIO_*` environment variables.
+After the S3 suite, the script writes connection metadata and UUID-scoped Keychain credentials in one test process and reads them from a fresh process before cleaning them up. This is the automated restart-persistence check.
+
+The pinned Linux arm64 images are MinIO `RELEASE.2025-09-07T16-13-09Z` and mc `RELEASE.2025-08-13T08-35-41Z`. The test endpoint is `http://127.0.0.1:19000`, uses Signature V4 and path-style addressing, and intentionally exercises a custom non-TLS endpoint. The fixture also creates a restricted account that can access only the test bucket, proving both permission errors and direct `/bucket/prefix` navigation. Override the ports or credentials through `MINIO_*` environment variables.
 
 The integration suite covers:
 

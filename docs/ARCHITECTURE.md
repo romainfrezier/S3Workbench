@@ -21,6 +21,7 @@ Compatibility settings are explicit:
 - optional request checksums are not forced, avoiding `aws-chunked` on providers that do not accept it;
 - credentials are supplied from Keychain, never profile JSON;
 - provider-specific APIs and AWS hostname assumptions are excluded.
+- upload, download, and move collisions use one explicit policy: cancel, replace, or generate a sibling name;
 
 The adapter is narrow enough to replace its transport or add a compatibility fallback if a tested provider demonstrates a concrete SDK limitation.
 

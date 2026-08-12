@@ -14,6 +14,10 @@ struct WorkbenchRootView: View {
   @State private var isDeleteConfirmationPresented = false
   @State private var connectionToDelete: ConnectionRow?
   @State private var renameKey: String?
+  @State private var pendingUploadURLs: [URL] = []
+  @State private var pendingDownloadDirectory: URL?
+  @State private var isUploadCollisionPresented = false
+  @State private var isDownloadCollisionPresented = false
 
   var body: some View {
     NavigationSplitView {
@@ -29,7 +33,6 @@ struct WorkbenchRootView: View {
     .navigationSplitViewStyle(.balanced)
     .toolbar { toolbarContent }
     .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Filter by key prefix")
-    .onSubmit(of: .search) { Task { await model.reloadObjects() } }
     .sheet(item: $connectionDraft) { draft in
       ConnectionEditorView(
         draft: draft,
@@ -43,19 +46,44 @@ struct WorkbenchRootView: View {
         set: { if !$0 { renameKey = nil } }
       )
     ) {
-      RenameObjectView(key: renameKey ?? "") { newKey in
-        let saved = await model.renameSelected(to: newKey)
+      RenameObjectView(key: renameKey ?? "") { newKey, collisionPolicy in
+        let saved = await model.renameSelected(to: newKey, collisionPolicy: collisionPolicy)
         if saved { renameKey = nil }
       }
     }
     .fileImporter(
       isPresented: $isUploadPresented, allowedContentTypes: [.item], allowsMultipleSelection: true
     ) { result in
-      if case .success(let urls) = result { Task { await model.upload(urls) } }
+      if case .success(let urls) = result { requestUpload(urls) }
     }
     .fileImporter(isPresented: $isDownloadDestinationPresented, allowedContentTypes: [.folder]) {
       result in
-      if case .success(let url) = result { Task { await model.downloadSelected(to: url) } }
+      if case .success(let url) = result {
+        pendingDownloadDirectory = url
+        isDownloadCollisionPresented = true
+      }
+    }
+    .confirmationDialog(
+      "If an object already exists",
+      isPresented: $isUploadCollisionPresented,
+      titleVisibility: .visible
+    ) {
+      Button("Keep Both") { performUpload(.keepBoth) }
+      Button("Replace", role: .destructive) { performUpload(.replace) }
+      Button("Cancel", role: .cancel) { pendingUploadURLs = [] }
+    } message: {
+      Text("Choose how uploads with the same key should be handled.")
+    }
+    .confirmationDialog(
+      "If a file already exists",
+      isPresented: $isDownloadCollisionPresented,
+      titleVisibility: .visible
+    ) {
+      Button("Keep Both") { performDownload(.keepBoth) }
+      Button("Replace", role: .destructive) { performDownload(.replace) }
+      Button("Cancel", role: .cancel) { pendingDownloadDirectory = nil }
+    } message: {
+      Text("Choose how downloads with the same filename should be handled.")
     }
     .confirmationDialog(
       "Delete selected objects?",
@@ -103,7 +131,7 @@ struct WorkbenchRootView: View {
     .task(id: model.searchQuery) {
       try? await Task.sleep(for: .milliseconds(300))
       guard !Task.isCancelled, model.location != nil else { return }
-      await model.reloadObjects()
+      await model.reloadSearchIfNeeded()
     }
   }
 
@@ -152,7 +180,7 @@ struct WorkbenchRootView: View {
     }
     .navigationTitle("S3 Workbench")
     .overlay {
-      if model.connections.isEmpty, !model.isLoading {
+      if model.connections.isEmpty, !model.isLoadingConnections {
         ContentUnavailableView {
           Label("No Connections", systemImage: "externaldrive.badge.plus")
         } description: {
@@ -176,6 +204,7 @@ struct WorkbenchRootView: View {
       ObjectBrowserView(
         model: model,
         requestUpload: { isUploadPresented = true },
+        queueUpload: requestUpload,
         requestDelete: { isDeleteConfirmationPresented = true },
         requestRename: { renameKey = $0 }
       )
@@ -270,6 +299,24 @@ struct WorkbenchRootView: View {
       NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
   }
+
+  private func requestUpload(_ urls: [URL]) {
+    guard !urls.isEmpty else { return }
+    pendingUploadURLs = urls
+    isUploadCollisionPresented = true
+  }
+
+  private func performUpload(_ collisionPolicy: CollisionPolicy) {
+    let urls = pendingUploadURLs
+    pendingUploadURLs = []
+    Task { await model.upload(urls, collisionPolicy: collisionPolicy) }
+  }
+
+  private func performDownload(_ collisionPolicy: CollisionPolicy) {
+    guard let directory = pendingDownloadDirectory else { return }
+    pendingDownloadDirectory = nil
+    Task { await model.downloadSelected(to: directory, collisionPolicy: collisionPolicy) }
+  }
 }
 
 private struct BucketBrowserView: View {
@@ -313,10 +360,27 @@ private struct BucketBrowserView: View {
     }
     .navigationTitle(model.selectedConnection?.name ?? "Buckets")
     .overlay {
-      if model.buckets.isEmpty, !model.isLoading {
+      if model.isLoadingBuckets, model.buckets.isEmpty {
+        ProgressView("Loading buckets…")
+      } else if let error = model.bucketErrorMessage, model.buckets.isEmpty {
+        ContentUnavailableView {
+          Label("Can’t Load Buckets", systemImage: "exclamationmark.triangle")
+        } description: {
+          Text(error)
+        } actions: {
+          Button("Retry") { Task { await model.reloadConnection() } }
+        }
+      } else if model.buckets.isEmpty {
         ContentUnavailableView(
           "No Buckets", systemImage: "shippingbox",
           description: Text("This connection contains no visible buckets."))
+      }
+    }
+    .safeAreaInset(edge: .top) {
+      if let error = model.bucketErrorMessage, !model.buckets.isEmpty {
+        RefreshErrorBanner(message: error) { Task { await model.reloadConnection() } }
+      } else if model.isLoadingBuckets, !model.buckets.isEmpty {
+        RefreshProgressBanner(title: "Refreshing buckets…")
       }
     }
   }
@@ -325,6 +389,7 @@ private struct BucketBrowserView: View {
 private struct ObjectBrowserView: View {
   @Bindable var model: WorkbenchViewModel
   let requestUpload: () -> Void
+  let queueUpload: ([URL]) -> Void
   let requestDelete: () -> Void
   let requestRename: (String) -> Void
 
@@ -405,7 +470,17 @@ private struct ObjectBrowserView: View {
       }
     }
     .overlay {
-      if model.objects.isEmpty, !model.isLoading {
+      if model.isLoadingObjects, model.objects.isEmpty {
+        ProgressView("Loading objects…")
+      } else if let error = model.objectErrorMessage, model.objects.isEmpty {
+        ContentUnavailableView {
+          Label("Can’t Load Objects", systemImage: "exclamationmark.triangle")
+        } description: {
+          Text(error)
+        } actions: {
+          Button("Retry") { Task { await model.reloadObjects() } }
+        }
+      } else if model.objects.isEmpty {
         ContentUnavailableView {
           Label(model.searchQuery.isEmpty ? "Empty Prefix" : "No Matches", systemImage: "tray")
         } description: {
@@ -417,6 +492,13 @@ private struct ObjectBrowserView: View {
         }
       }
     }
+    .safeAreaInset(edge: .top) {
+      if let error = model.objectErrorMessage, !model.objects.isEmpty {
+        RefreshErrorBanner(message: error) { Task { await model.reloadObjects() } }
+      } else if model.isLoadingObjects, !model.objects.isEmpty {
+        RefreshProgressBanner(title: "Refreshing objects…")
+      }
+    }
     .overlay {
       if model.isDropTargeted {
         RoundedRectangle(cornerRadius: 12)
@@ -426,7 +508,7 @@ private struct ObjectBrowserView: View {
       }
     }
     .dropDestination(for: URL.self) { urls, _ in
-      Task { await model.upload(urls) }
+      queueUpload(urls)
       return !urls.isEmpty
     } isTargeted: {
       model.isDropTargeted = $0
@@ -452,6 +534,38 @@ private struct ObjectBrowserView: View {
     return "doc"
   }
 
+}
+
+private struct RefreshProgressBanner: View {
+  let title: String
+
+  var body: some View {
+    HStack(spacing: 8) {
+      ProgressView().controlSize(.small)
+      Text(title).font(.callout)
+      Spacer()
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
+    .background(.bar)
+  }
+}
+
+private struct RefreshErrorBanner: View {
+  let message: String
+  let retry: () -> Void
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+      Text(message).font(.callout).lineLimit(2)
+      Spacer()
+      Button("Retry", action: retry)
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
+    .background(.bar)
+  }
 }
 
 private struct BreadcrumbView: View {
@@ -645,16 +759,22 @@ private struct TransferListView: View {
 private struct RenameObjectView: View {
   @Environment(\.dismiss) private var dismiss
   @State var key: String
-  let save: (String) async -> Void
+  @State private var collisionPolicy = CollisionPolicy.cancel
+  let save: (String, CollisionPolicy) async -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       Text("Rename Object").font(.title2.bold())
       TextField("Object key", text: $key)
+      Picker("If destination exists", selection: $collisionPolicy) {
+        ForEach(CollisionPolicy.allCases) { policy in
+          Text(policy.label).tag(policy)
+        }
+      }
       HStack {
         Spacer()
         Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-        Button("Rename") { Task { await save(key) } }
+        Button("Rename") { Task { await save(key, collisionPolicy) } }
           .keyboardShortcut(.defaultAction)
           .disabled(key.isEmpty)
       }

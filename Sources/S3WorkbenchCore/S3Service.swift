@@ -33,6 +33,7 @@ public protocol S3Service: Sendable {
         bucket: String,
         key: String,
         to destinationURL: URL,
+        overwrite: Bool,
         progress: TransferProgressHandler?
     ) async throws
 }
@@ -90,12 +91,14 @@ public extension S3Service {
         bucket: String,
         key: String,
         to destinationURL: URL,
+        overwrite: Bool = false,
         progress: TransferProgressHandler? = nil
     ) async throws {
         try await downloadFile(
             bucket: bucket,
             key: key,
             to: destinationURL,
+            overwrite: overwrite,
             progress: progress
         )
     }

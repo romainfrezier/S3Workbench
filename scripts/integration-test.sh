@@ -9,6 +9,8 @@ export MINIO_CONSOLE_PORT=${MINIO_CONSOLE_PORT:-19001}
 export MINIO_ROOT_USER=${MINIO_ROOT_USER:-s3workbench}
 export MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-s3workbench-secret}
 export MINIO_TEST_BUCKET=${MINIO_TEST_BUCKET:-s3workbench-tests}
+export MINIO_RESTRICTED_USER=${MINIO_RESTRICTED_USER:-s3workbench-restricted}
+export MINIO_RESTRICTED_PASSWORD=${MINIO_RESTRICTED_PASSWORD:-s3workbench-restricted-secret}
 
 compose=(docker compose -f "$COMPOSE_FILE")
 cleanup() {
@@ -27,6 +29,8 @@ export S3_TEST_REGION=us-east-1
 export S3_TEST_BUCKET="$MINIO_TEST_BUCKET"
 export S3_TEST_ADDRESSING_STYLE=path
 export S3_TEST_TLS_VERIFY=1
+export S3_TEST_RESTRICTED_ACCESS_KEY="$MINIO_RESTRICTED_USER"
+export S3_TEST_RESTRICTED_SECRET_KEY="$MINIO_RESTRICTED_PASSWORD"
 export AWS_ACCESS_KEY_ID="$MINIO_ROOT_USER"
 export AWS_SECRET_ACCESS_KEY="$MINIO_ROOT_PASSWORD"
 export AWS_REGION=us-east-1
@@ -47,5 +51,18 @@ export AWS_EC2_METADATA_DISABLED=true
 echo "MinIO fixture smoke checks passed"
 
 swift test --package-path "$ROOT"
+
+RESTART_PROBE_FILE=$(mktemp "${TMPDIR:-/tmp}/s3workbench-restart.XXXXXX")
+rm -f -- "$RESTART_PROBE_FILE"
+cleanup_restart_probe() {
+  S3_RESTART_PROBE_PHASE=cleanup S3_RESTART_PROBE_FILE="$RESTART_PROBE_FILE" \
+    swift test --package-path "$ROOT" --skip-build --filter restartPersistenceProbe >/dev/null 2>&1 || true
+}
+trap 'cleanup_restart_probe; cleanup' EXIT
+S3_RESTART_PROBE_PHASE=write S3_RESTART_PROBE_FILE="$RESTART_PROBE_FILE" \
+  swift test --package-path "$ROOT" --skip-build --filter restartPersistenceProbe
+S3_RESTART_PROBE_PHASE=read S3_RESTART_PROBE_FILE="$RESTART_PROBE_FILE" \
+  swift test --package-path "$ROOT" --skip-build --filter restartPersistenceProbe
+echo "Connection metadata and Keychain credentials survived a fresh test process"
 
 echo "Swift and MinIO integration checks passed at $S3_TEST_ENDPOINT"

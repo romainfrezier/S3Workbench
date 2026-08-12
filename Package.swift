@@ -18,6 +18,7 @@ let package = Package(
             dependencies: [
                 .product(name: "AWSS3", package: "aws-sdk-swift"),
                 .product(name: "AWSSDKIdentity", package: "aws-sdk-swift"),
+                .product(name: "AWSClientRuntime", package: "aws-sdk-swift"),
                 .product(name: "ClientRuntime", package: "smithy-swift"),
                 .product(name: "SmithySwiftNIO", package: "smithy-swift"),
             ]
@@ -30,6 +31,10 @@ let package = Package(
         .testTarget(
             name: "S3WorkbenchCoreTests",
             dependencies: ["S3WorkbenchCore"]
+        ),
+        .testTarget(
+            name: "S3WorkbenchTests",
+            dependencies: ["S3Workbench", "S3WorkbenchCore"]
         ),
     ]
 )

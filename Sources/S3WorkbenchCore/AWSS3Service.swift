@@ -1,5 +1,6 @@
 import AWSS3
 import AWSSDKIdentity
+import AWSClientRuntime
 import ClientRuntime
 import Foundation
 import Security
@@ -273,6 +274,7 @@ public actor AWSS3Service: S3Service {
         bucket: String,
         key: String,
         to destinationURL: URL,
+        overwrite: Bool,
         progress: TransferProgressHandler?
     ) async throws {
         try validate(bucket: bucket, key: key)
@@ -317,10 +319,14 @@ public actor AWSS3Service: S3Service {
         }
         try handle.synchronize()
         try handle.close()
-        guard !FileManager.default.fileExists(atPath: destinationURL.path) else {
-            throw S3ServiceError.conflict("A file already exists at the download destination.")
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            guard overwrite else {
+                throw S3ServiceError.conflict("A file already exists at the download destination.")
+            }
+            _ = try FileManager.default.replaceItemAt(destinationURL, withItemAt: tempURL)
+        } else {
+            try FileManager.default.moveItem(at: tempURL, to: destinationURL)
         }
-        try FileManager.default.moveItem(at: tempURL, to: destinationURL)
         completed = true
     }
 
@@ -408,16 +414,55 @@ public actor AWSS3Service: S3Service {
     private func map(_ error: Error) -> S3ServiceError {
         if let error = error as? S3ServiceError { return error }
         if error is CancellationError || Task.isCancelled { return .cancelled }
+        if let serviceError = error as? any AWSServiceError,
+           let httpError = error as? any HTTPError {
+            let code = serviceError.errorCode?.lowercased() ?? ""
+            if code.contains("invalidaccesskey") { return .authenticationFailed }
+            if code.contains("signaturedoesnotmatch") { return .signatureMismatch }
+            if code.contains("authorizationheadermalformed") || code.contains("incorrectregion") {
+                return .wrongRegion
+            }
+            switch httpError.httpResponse.statusCode.rawValue {
+            case 401: return .authenticationFailed
+            case 403: return .accessDenied
+            case 404: return .notFound
+            case 409: return .conflict("The destination already exists.")
+            default: break
+            }
+        }
         if error is NoSuchBucket || error is NoSuchKey || error is AWSS3.NotFound { return .notFound }
         if error is AccessDenied { return .accessDenied }
         if error is BucketAlreadyExists || error is BucketAlreadyOwnedByYou {
             return .conflict("A bucket with that name already exists.")
         }
         let typeName = String(describing: type(of: error))
-        if typeName.contains("InvalidAccessKey") || typeName.contains("SignatureDoesNotMatch") {
-            return .authenticationFailed
-        }
         let message = redacted(error.localizedDescription)
+        let diagnostic = "\(typeName) \(message)".lowercased()
+        if typeName.contains("InvalidAccessKey") { return .authenticationFailed }
+        if typeName.contains("SignatureDoesNotMatch") || diagnostic.contains("signaturedoesnotmatch") {
+            return .signatureMismatch
+        }
+        if diagnostic.contains("authorizationheadermalformed") || diagnostic.contains("incorrect region") {
+            return .wrongRegion
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .serverCertificateUntrusted, .serverCertificateHasBadDate,
+                 .serverCertificateHasUnknownRoot, .secureConnectionFailed,
+                 .clientCertificateRejected, .clientCertificateRequired:
+                return .tlsFailure
+            case .notConnectedToInternet, .cannotFindHost, .cannotConnectToHost,
+                 .dnsLookupFailed, .networkConnectionLost, .timedOut:
+                return .networkUnavailable
+            default: break
+            }
+        }
+        if diagnostic.contains("certificate") || diagnostic.contains("tls") {
+            return .tlsFailure
+        }
+        if diagnostic.contains("connection refused") || diagnostic.contains("network is unreachable") {
+            return .networkUnavailable
+        }
         return .service(message.isEmpty ? "The S3 request failed." : message)
     }
 

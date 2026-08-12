@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import S3WorkbenchCore
 
 @MainActor
 @Observable
@@ -15,15 +16,27 @@ final class WorkbenchViewModel {
   var searchQuery = ""
   var continuationToken: String?
   var transfers: [TransferRow] = []
-  var isLoading = false
+  var isLoadingConnections = false
+  var isLoadingBuckets = false
+  var isLoadingObjects = false
   var isLoadingMore = false
   var isDropTargeted = false
   var errorMessage: String?
-  var previewURL: URL?
+  var bucketErrorMessage: String?
+  var objectErrorMessage: String?
+  var previewURL: URL? {
+    didSet {
+      guard oldValue != previewURL, let oldValue, isManagedPreview(oldValue) else { return }
+      try? FileManager.default.removeItem(at: oldValue)
+    }
+  }
   var history: [String] = [""]
   var historyIndex = 0
 
   private let service: any WorkbenchServing
+  private var appliedSearchQuery = ""
+  private var loadedBucketConnectionID: UUID?
+  private var loadedObjectContext: ObjectLoadContext?
 
   init(service: any WorkbenchServing) {
     self.service = service
@@ -33,7 +46,7 @@ final class WorkbenchViewModel {
     connections.first { $0.id == selectedConnectionID }
   }
 
-  var accessRoot: (bucket: String, prefix: String)? { selectedConnection?.initialLocation }
+  var accessRoot: S3AccessRoot? { selectedConnection?.initialLocation }
   var accessRootPrefix: String { accessRoot?.prefix ?? "" }
 
   var selectedObjects: [ObjectRow] {
@@ -56,10 +69,14 @@ final class WorkbenchViewModel {
   var canGoForward: Bool { historyIndex + 1 < history.count }
 
   func start() async {
-    await perform {
+    isLoadingConnections = true
+    defer { isLoadingConnections = false }
+    do {
       connections = try await service.loadConnections()
       selectedConnectionID = selectedConnectionID ?? connections.first?.id
       await refreshTransfers()
+    } catch {
+      errorMessage = error.localizedDescription
     }
   }
 
@@ -69,8 +86,10 @@ final class WorkbenchViewModel {
     objects = []
     selectedObjectIDs = []
     objectDetails = nil
+    searchQuery = ""
     history = [""]
     historyIndex = 0
+    bucketErrorMessage = nil
     guard let selectedConnectionID else {
       buckets = []
       return
@@ -83,8 +102,17 @@ final class WorkbenchViewModel {
       await reloadObjects()
       return
     }
-    await perform {
-      buckets = try await service.listBuckets(connectionID: selectedConnectionID)
+    if loadedBucketConnectionID != selectedConnectionID { buckets = [] }
+    isLoadingBuckets = true
+    defer { isLoadingBuckets = false }
+    do {
+      let loadedBuckets = try await service.listBuckets(connectionID: selectedConnectionID)
+      guard self.selectedConnectionID == selectedConnectionID else { return }
+      buckets = loadedBuckets
+      loadedBucketConnectionID = selectedConnectionID
+    } catch {
+      guard self.selectedConnectionID == selectedConnectionID else { return }
+      bucketErrorMessage = error.localizedDescription
     }
   }
 
@@ -150,15 +178,31 @@ final class WorkbenchViewModel {
 
   func reloadObjects() async {
     guard let location else { return }
+    let context = ObjectLoadContext(location: location, query: searchQuery)
+    if loadedObjectContext != context { objects = [] }
+    appliedSearchQuery = searchQuery
     selectedObjectIDs = []
     objectDetails = nil
     continuationToken = nil
-    await perform {
+    objectErrorMessage = nil
+    isLoadingObjects = true
+    defer { isLoadingObjects = false }
+    do {
       let page = try await service.listObjects(
         at: location, query: searchQuery, continuationToken: nil)
+      guard self.location == location, self.searchQuery == context.query else { return }
       objects = page.objects
       continuationToken = page.continuationToken
+      loadedObjectContext = context
+    } catch {
+      guard self.location == location, self.searchQuery == context.query else { return }
+      objectErrorMessage = error.localizedDescription
     }
+  }
+
+  func reloadSearchIfNeeded() async {
+    guard location != nil, appliedSearchQuery != searchQuery else { return }
+    await reloadObjects()
   }
 
   func loadMore() async {
@@ -227,19 +271,21 @@ final class WorkbenchViewModel {
     try await service.testConnection(draft)
   }
 
-  func upload(_ urls: [URL]) async {
+  func upload(_ urls: [URL], collisionPolicy: CollisionPolicy) async {
     guard let location, !urls.isEmpty else { return }
     await perform {
-      try await service.upload(files: urls, to: location)
+      try await service.upload(files: urls, to: location, collisionPolicy: collisionPolicy)
       await refreshTransfers()
       await reloadObjects()
     }
   }
 
-  func downloadSelected(to directory: URL) async {
+  func downloadSelected(to directory: URL, collisionPolicy: CollisionPolicy) async {
     guard let location, !selectedObjects.isEmpty else { return }
     await perform {
-      try await service.download(objects: selectedObjects, from: location, to: directory)
+      try await service.download(
+        objects: selectedObjects, from: location, to: directory,
+        collisionPolicy: collisionPolicy)
       await refreshTransfers()
     }
   }
@@ -252,10 +298,12 @@ final class WorkbenchViewModel {
     }
   }
 
-  func renameSelected(to newKey: String) async -> Bool {
+  func renameSelected(to newKey: String, collisionPolicy: CollisionPolicy) async -> Bool {
     guard let location, let selectedObject, !newKey.isEmpty else { return false }
     do {
-      try await service.move(object: selectedObject, from: location, toKey: newKey)
+      try await service.move(
+        object: selectedObject, from: location, toKey: newKey,
+        collisionPolicy: collisionPolicy)
       await reloadObjects()
       return true
     } catch {
@@ -299,12 +347,19 @@ final class WorkbenchViewModel {
   }
 
   private func perform(_ operation: () async throws -> Void) async {
-    isLoading = true
-    defer { isLoading = false }
     do {
       try await operation()
     } catch {
       errorMessage = error.localizedDescription
     }
   }
+
+  private func isManagedPreview(_ url: URL) -> Bool {
+    url.path.contains("/S3Workbench-Previews/")
+  }
+}
+
+private struct ObjectLoadContext: Equatable {
+  let location: ObjectLocation
+  let query: String
 }

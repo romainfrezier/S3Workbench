@@ -76,6 +76,41 @@ import Testing
         )
         #expect(try await directService.testConnection().bucketCount == 1)
 
+        if let restrictedCredentials = fixture.restrictedCredentials {
+            let restrictedService = try AWSS3Service(
+                profile: fixture.profile,
+                credentials: restrictedCredentials
+            )
+            let visibleBuckets = try await restrictedService.listBuckets()
+            #expect(visibleBuckets.contains { $0.name == fixture.bucket })
+            #expect(!visibleBuckets.contains { $0.name == "\(fixture.bucket)-forbidden" })
+            await #expect(throws: S3ServiceError.accessDenied) {
+                _ = try await restrictedService.listObjects(
+                    bucket: "\(fixture.bucket)-forbidden",
+                    prefix: "",
+                    continuationToken: nil,
+                    pageSize: 1
+                )
+            }
+            let restrictedDirectService = try AWSS3Service(
+                profile: ConnectionProfile(
+                    name: "Restricted direct path",
+                    endpoint: fixture.profile.endpoint,
+                    accessPath: "/\(fixture.bucket)/\(runPrefix)",
+                    region: fixture.profile.region,
+                    addressingStyle: .path
+                ),
+                credentials: restrictedCredentials
+            )
+            #expect(try await restrictedDirectService.testConnection().bucketCount == 1)
+            _ = try await restrictedDirectService.listObjects(
+                bucket: fixture.bucket,
+                prefix: runPrefix,
+                continuationToken: nil,
+                pageSize: 1
+            )
+        }
+
         let rootPage = try await service.listObjects(
             bucket: fixture.bucket,
             prefix: runPrefix,
@@ -114,6 +149,24 @@ import Testing
 
         let download = directory.appendingPathComponent("small-download.txt")
         try await service.downloadFile(bucket: fixture.bucket, key: unicodeKey, to: download, progress: nil)
+        #expect(try Data(contentsOf: download) == payload)
+        try Data("stale local file".utf8).write(to: download)
+        await #expect(throws: (any Error).self) {
+            try await service.downloadFile(
+                bucket: fixture.bucket,
+                key: unicodeKey,
+                to: download,
+                overwrite: false,
+                progress: nil
+            )
+        }
+        try await service.downloadFile(
+            bucket: fixture.bucket,
+            key: unicodeKey,
+            to: download,
+            overwrite: true,
+            progress: nil
+        )
         #expect(try Data(contentsOf: download) == payload)
 
         try await service.renameObject(
@@ -183,6 +236,7 @@ import Testing
 private struct IntegrationFixture {
     let profile: ConnectionProfile
     let credentials: S3Credentials
+    let restrictedCredentials: S3Credentials?
     let bucket: String
 
     static func environment() throws -> Self? {
@@ -195,6 +249,13 @@ private struct IntegrationFixture {
             throw S3ServiceError.invalidConfiguration("S3 integration environment is incomplete.")
         }
         let addressingStyle: S3AddressingStyle = environment["S3_TEST_ADDRESSING_STYLE"] == "virtual" ? .virtualHosted : .path
+        let restrictedCredentials: S3Credentials?
+        if let accessKey = environment["S3_TEST_RESTRICTED_ACCESS_KEY"],
+           let secretKey = environment["S3_TEST_RESTRICTED_SECRET_KEY"] {
+            restrictedCredentials = try S3Credentials(accessKey: accessKey, secretKey: secretKey)
+        } else {
+            restrictedCredentials = nil
+        }
         return try Self(
             profile: ConnectionProfile(
                 name: "Integration MinIO",
@@ -203,6 +264,7 @@ private struct IntegrationFixture {
                 addressingStyle: addressingStyle
             ).validated(),
             credentials: S3Credentials(accessKey: accessKey, secretKey: secretKey),
+            restrictedCredentials: restrictedCredentials,
             bucket: bucket
         )
     }

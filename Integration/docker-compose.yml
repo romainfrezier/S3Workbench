@@ -27,8 +27,11 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-s3workbench}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-s3workbench-secret}
       MINIO_TEST_BUCKET: ${MINIO_TEST_BUCKET:-s3workbench-tests}
+      MINIO_RESTRICTED_USER: ${MINIO_RESTRICTED_USER:-s3workbench-restricted}
+      MINIO_RESTRICTED_PASSWORD: ${MINIO_RESTRICTED_PASSWORD:-s3workbench-restricted-secret}
     volumes:
       - ./init-minio.sh:/init-minio.sh:ro
+      - ./restricted-policy.json:/restricted-policy.json:ro
     entrypoint: ["/bin/sh", "/init-minio.sh"]
 
 volumes:

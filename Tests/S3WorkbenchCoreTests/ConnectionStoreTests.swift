@@ -49,6 +49,28 @@ import Testing
     #expect(profile.accessPath == "/etickets/incoming")
 }
 
+@Test func accessRootNormalizesOnlyTheContainerBoundary() throws {
+    let root = try S3AccessRoot(path: "//bucket/a//b")
+    #expect(root.bucket == "bucket")
+    #expect(root.prefix == "a//b/")
+    #expect(root.path == "/bucket/a//b")
+    #expect(throws: (any Error).self) { try S3AccessRoot(path: "/") }
+}
+
+@Test func operationalErrorsRemainActionableAndSecretFree() {
+    let errors: [S3ServiceError] = [
+        .authenticationFailed, .signatureMismatch, .accessDenied, .wrongRegion,
+        .tlsFailure, .networkUnavailable,
+    ]
+    for error in errors {
+        let message = error.localizedDescription
+        #expect(!message.isEmpty)
+        #expect(!message.localizedCaseInsensitiveContains("authorization:"))
+        #expect(!message.localizedCaseInsensitiveContains("x-amz-signature"))
+    }
+    #expect(S3ServiceError.accessDenied.localizedDescription.contains("/bucket/prefix"))
+}
+
 @Test func profilesSavedBeforeAccessPathsAndColorsStillDecode() throws {
     let profile = ConnectionProfile(
         name: "Legacy",
@@ -143,6 +165,9 @@ import Testing
         #expect(credentials.accessKey == "restart-access")
         #expect(credentials.secretKey == "restart-secret")
         try credentialStore.remove(for: connectionID)
+        try? FileManager.default.removeItem(atPath: filePath)
+    } else if phase == "cleanup" {
+        try? credentialStore.remove(for: connectionID)
         try? FileManager.default.removeItem(atPath: filePath)
     }
 }

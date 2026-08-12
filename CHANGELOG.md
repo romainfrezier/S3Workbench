@@ -2,6 +2,21 @@
 
 All notable changes to S3Workbench are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-12
+
+### Added
+
+- Explicit Keep Both, Replace, or Cancel policies for upload, download, and move collisions.
+- Dedicated loading, empty, and permission/error states with in-place retry actions.
+- Automated restricted-credential MinIO coverage, including a direct `/bucket/prefix` root.
+- Tag-only Release and DMG validation in CI, with dependency caching for normal test runs.
+
+### Changed
+
+- Centralized direct access-root parsing and actionable S3 authentication, region, TLS, network, and authorization errors.
+- Hardened connection and custom-CA persistence rollback so failed saves do not leave partial secrets or certificate state.
+- Quick Look temporary files are removed when their preview is dismissed or replaced.
+
 ## [0.2.0] - 2026-08-12
 
 ### Added
@@ -28,3 +43,4 @@ All notable changes to S3Workbench are documented here. The project follows [Sem
 
 [0.1.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.1.0
 [0.2.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.2.0
+[0.3.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.3.0

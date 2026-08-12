@@ -12,6 +12,34 @@ public enum TLSVerification: String, Codable, CaseIterable, Sendable {
     case disabled
 }
 
+public struct S3AccessRoot: Codable, Hashable, Sendable {
+    public let bucket: String
+    public let prefix: String
+
+    public init(bucket: String, prefix: String = "") throws {
+        guard !bucket.isEmpty, !bucket.contains("/"), !bucket.contains("\0") else {
+            throw S3ServiceError.invalidConfiguration("Access path must contain a valid bucket name.")
+        }
+        var prefix = prefix
+        while prefix.first == "/" { prefix.removeFirst() }
+        if !prefix.isEmpty, !prefix.hasSuffix("/") { prefix += "/" }
+        self.bucket = bucket
+        self.prefix = prefix
+    }
+
+    public init(path: String) throws {
+        var path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        while path.first == "/" { path.removeFirst() }
+        guard !path.isEmpty else {
+            throw S3ServiceError.invalidConfiguration("Access path must contain a bucket name.")
+        }
+        let parts = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        try self.init(bucket: String(parts[0]), prefix: parts.count == 2 ? String(parts[1]) : "")
+    }
+
+    public var path: String { "/" + bucket + (prefix.isEmpty ? "" : "/" + prefix.dropLast()) }
+}
+
 public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
     public var id: UUID
     public var name: String
@@ -58,11 +86,7 @@ public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
             throw S3ServiceError.invalidConfiguration("Endpoint cannot contain credentials, a query, or a fragment.")
         }
         let accessPath = accessPath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let accessPath, !accessPath.isEmpty {
-            guard try resolvedAccessPath() != nil else {
-                throw S3ServiceError.invalidConfiguration("Access path must contain a bucket name.")
-            }
-        }
+        if let accessPath, !accessPath.isEmpty { _ = try S3AccessRoot(path: accessPath) }
         if let colorHex {
             guard colorHex.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil else {
                 throw S3ServiceError.invalidConfiguration("Connection color must use #RRGGBB format.")
@@ -85,21 +109,11 @@ public struct ConnectionProfile: Codable, Hashable, Identifiable, Sendable {
         return copy
     }
 
-    public func resolvedAccessPath() throws -> (bucket: String, prefix: String)? {
-        guard var path = accessPath?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !path.isEmpty else { return nil }
-        while path.first == "/" { path.removeFirst() }
-        guard !path.isEmpty else {
-            throw S3ServiceError.invalidConfiguration("Access path must contain a bucket name.")
+    public func resolvedAccessPath() throws -> S3AccessRoot? {
+        guard let accessPath, !accessPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
         }
-        let parts = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-        let bucket = String(parts[0])
-        guard !bucket.isEmpty else {
-            throw S3ServiceError.invalidConfiguration("Access path must contain a bucket name.")
-        }
-        var prefix = parts.count == 2 ? String(parts[1]) : ""
-        if !prefix.isEmpty, !prefix.hasSuffix("/") { prefix += "/" }
-        return (bucket, prefix)
+        return try S3AccessRoot(path: accessPath)
     }
 }
 
@@ -238,7 +252,11 @@ public struct S3PresignedRequest: Sendable {
 public enum S3ServiceError: Error, Equatable, Sendable {
     case invalidConfiguration(String)
     case authenticationFailed
+    case signatureMismatch
     case accessDenied
+    case wrongRegion
+    case tlsFailure
+    case networkUnavailable
     case notFound
     case conflict(String)
     case cancelled
@@ -252,10 +270,21 @@ extension S3ServiceError: LocalizedError {
         switch self {
         case .invalidConfiguration(let message), .conflict(let message), .unsupported(let message),
              .transport(let message), .service(let message): message
-        case .authenticationFailed: "Authentication failed. Check the access key, secret, region, and clock."
-        case .accessDenied: "The credentials do not permit this operation."
+        case .authenticationFailed: "Authentication failed. Check the access key and secret access key."
+        case .signatureMismatch: "The request signature was rejected. Check the region, server clock, and addressing style."
+        case .accessDenied: "The credentials do not permit this operation. Configure a direct /bucket/prefix access path if bucket listing is restricted."
+        case .wrongRegion: "The server rejected the signing region. Check the connection region."
+        case .tlsFailure: "The TLS connection could not be verified. Check the server certificate or custom CA."
+        case .networkUnavailable: "The server is unreachable. Check the host, port, network, and local network permission."
         case .notFound: "The requested bucket or object was not found."
         case .cancelled: "The operation was cancelled."
         }
+    }
+}
+
+public extension S3ServiceError {
+    var isConflict: Bool {
+        if case .conflict = self { return true }
+        return false
     }
 }

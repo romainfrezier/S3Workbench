@@ -3,37 +3,30 @@ import S3WorkbenchCore
 import UniformTypeIdentifiers
 
 actor CoreWorkbenchService: WorkbenchServing {
-  private struct TransferEntry {
-    var row: TransferRow
-    let operation: TransferOperation
-  }
-
-  private enum TransferOperation: Sendable {
-    case upload(source: URL, location: ObjectLocation)
-    case download(object: ObjectRow, location: ObjectLocation, directory: URL)
+  enum TransferOperation: Sendable {
+    case upload(source: URL, location: ObjectLocation, collisionPolicy: CollisionPolicy)
+    case download(
+      object: ObjectRow, location: ObjectLocation, directory: URL,
+      collisionPolicy: CollisionPolicy)
 
     var title: String {
       switch self {
-      case .upload(let source, _): source.lastPathComponent
-      case .download(let object, _, _): object.displayName
+      case .upload(let source, _, _): source.lastPathComponent
+      case .download(let object, _, _, _): object.displayName
       }
     }
 
     var subtitle: String {
       switch self {
-      case .upload(_, let location): "Upload to \(location.bucket)"
-      case .download(_, let location, _): "Download from \(location.bucket)"
+      case .upload(_, let location, _): "Upload to \(location.bucket)"
+      case .download(_, let location, _, _): "Download from \(location.bucket)"
       }
     }
   }
 
   private let connectionStore: ConnectionStore
   private let credentialStore: any CredentialStore
-  private var transferEntries: [UUID: TransferEntry] = [:]
-  private var transferTasks: [UUID: Task<Void, Never>] = [:]
-  private var activeTransferCount = 0
-  private var transferWaiters: [CheckedContinuation<Void, Never>] = []
-  private let maximumConcurrentTransfers = 4
+  private let transferManager = TransferManager<TransferOperation>(maximumConcurrentTransfers: 4)
 
   init(
     connectionStore: ConnectionStore,
@@ -55,6 +48,8 @@ actor CoreWorkbenchService: WorkbenchServing {
 
   func saveConnection(_ draft: ConnectionDraft) async throws -> ConnectionRow {
     let previousProfile = try await connectionStore.load().first { $0.id == draft.id }
+    let previousCredentials = try credentialStore.credentials(for: draft.id)
+    _ = try draft.profile()
     var savedDraft = draft
     if draft.tlsPolicy == .customCA, let customCAURL = draft.customCAURL {
       savedDraft.customCAURL = try persistCACertificate(customCAURL, connectionID: draft.id)
@@ -65,13 +60,29 @@ actor CoreWorkbenchService: WorkbenchServing {
     guard hasAccessKey == hasSecretKey else {
       throw S3ServiceError.invalidConfiguration("Enter both the access key and secret access key.")
     }
-    if hasAccessKey {
-      let credentials = try S3Credentials(accessKey: draft.accessKey, secretKey: draft.secretKey)
-      try credentialStore.save(credentials, for: profile.id)
-    } else if try credentialStore.credentials(for: profile.id) == nil {
+    if !hasAccessKey, previousCredentials == nil {
       throw S3ServiceError.invalidConfiguration("Access key and secret access key are required.")
     }
-    _ = try await connectionStore.upsert(profile)
+    do {
+      if hasAccessKey {
+        let credentials = try S3Credentials(accessKey: draft.accessKey, secretKey: draft.secretKey)
+        try credentialStore.save(credentials, for: profile.id)
+      }
+      _ = try await connectionStore.upsert(profile)
+    } catch {
+      if let previousCredentials {
+        try? credentialStore.save(previousCredentials, for: draft.id)
+      } else {
+        try? credentialStore.remove(for: draft.id)
+      }
+      if let newCertificate = profile.customCACertificateURL,
+        newCertificate != previousProfile?.customCACertificateURL,
+        isManagedCertificate(newCertificate)
+      {
+        try? FileManager.default.removeItem(at: newCertificate)
+      }
+      throw error
+    }
     if let oldCertificate = previousProfile?.customCACertificateURL,
       oldCertificate != profile.customCACertificateURL
     {
@@ -115,10 +126,17 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   func removeConnection(id: UUID) async throws {
-    let certificateURL = try await connectionStore.load().first { $0.id == id }?
-      .customCACertificateURL
-    _ = try await connectionStore.remove(id: id)
+    let profiles = try await connectionStore.load()
+    let profile = profiles.first { $0.id == id }
+    let certificateURL = profile?.customCACertificateURL
+    let credentials = try credentialStore.credentials(for: id)
     try credentialStore.remove(for: id)
+    do {
+      _ = try await connectionStore.remove(id: id)
+    } catch {
+      if let credentials { try? credentialStore.save(credentials, for: id) }
+      throw error
+    }
     if let certificateURL, isManagedCertificate(certificateURL) {
       try? FileManager.default.removeItem(at: certificateURL)
     }
@@ -203,30 +221,33 @@ actor CoreWorkbenchService: WorkbenchServing {
     )
   }
 
-  func upload(files: [URL], to location: ObjectLocation) async throws {
+  func upload(
+    files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy
+  ) async throws {
     var transferIDs: [UUID] = []
     for source in files {
       try Task.checkCancellation()
-      transferIDs.append(enqueue(.upload(source: source, location: location)))
+      let operation = TransferOperation.upload(
+        source: source, location: location, collisionPolicy: collisionPolicy)
+      transferIDs.append(await enqueue(operation))
     }
-    for id in transferIDs {
-      await transferTasks[id]?.value
-    }
-    try throwIfTransferFailed(transferIDs)
+    try await transferManager.waitForCompletion(of: transferIDs)
   }
 
-  func download(objects: [ObjectRow], from location: ObjectLocation, to directory: URL) async throws
+  func download(
+    objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
+    collisionPolicy: CollisionPolicy
+  ) async throws
   {
     var transferIDs: [UUID] = []
     for object in objects where !object.isPrefix {
       try Task.checkCancellation()
-      transferIDs.append(
-        enqueue(.download(object: object, location: location, directory: directory)))
+      let operation = TransferOperation.download(
+        object: object, location: location, directory: directory,
+        collisionPolicy: collisionPolicy)
+      transferIDs.append(await enqueue(operation))
     }
-    for id in transferIDs {
-      await transferTasks[id]?.value
-    }
-    try throwIfTransferFailed(transferIDs)
+    try await transferManager.waitForCompletion(of: transferIDs)
   }
 
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws {
@@ -237,13 +258,18 @@ actor CoreWorkbenchService: WorkbenchServing {
     }
   }
 
-  func move(object: ObjectRow, from location: ObjectLocation, toKey: String) async throws {
+  func move(
+    object: ObjectRow, from location: ObjectLocation, toKey: String,
+    collisionPolicy: CollisionPolicy
+  ) async throws {
     let service = try await s3Service(connectionID: location.connectionID)
-    try await requireRemoteDestinationAvailable(service: service, bucket: location.bucket, key: toKey)
+    let destinationKey = try await remoteDestinationKey(
+      service: service, bucket: location.bucket, proposedKey: toKey,
+      collisionPolicy: collisionPolicy)
     try await service.renameObject(
       bucket: location.bucket,
       sourceKey: object.key,
-      destinationKey: toKey
+      destinationKey: destinationKey
     )
   }
 
@@ -278,148 +304,71 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   func transfers() async -> [TransferRow] {
-    transferEntries.values.map(\.row).sorted { lhs, rhs in
-      if lhs.state == rhs.state {
-        return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-      }
-      return transferPriority(lhs.state) < transferPriority(rhs.state)
-    }
+    await transferManager.rows()
   }
 
   func cancelTransfer(id: UUID) async {
-    transferTasks[id]?.cancel()
-    updateTransfer(id: id, state: .cancelled)
+    await transferManager.cancel(id: id)
   }
 
   func retryTransfer(id: UUID) async {
-    guard let entry = transferEntries[id] else { return }
-    if let task = transferTasks[id] {
-      task.cancel()
-      await task.value
-    }
-    transferEntries.removeValue(forKey: id)
-    transferTasks.removeValue(forKey: id)
-    _ = enqueue(entry.operation)
+    await transferManager.retry(id: id)
   }
 
-  @discardableResult
-  private func enqueue(_ operation: TransferOperation) -> UUID {
-    let id = UUID()
-    let row = TransferRow(
-      id: id,
+  private func enqueue(_ operation: TransferOperation) async -> UUID {
+    await transferManager.enqueue(
+      operation,
       title: operation.title,
-      subtitle: operation.subtitle,
-      progress: 0,
-      state: .queued,
-      errorMessage: nil
-    )
-    transferEntries[id] = TransferEntry(row: row, operation: operation)
-    transferTasks[id] = Task { [weak self] in
-      await self?.runTransfer(id: id, operation: operation)
+      subtitle: operation.subtitle
+    ) { [weak self] operation, progress in
+      guard let self else { throw CancellationError() }
+      try await self.executeTransfer(operation, progress: progress)
     }
-    return id
   }
 
-  private func runTransfer(id: UUID, operation: TransferOperation) async {
-    await acquireTransferSlot()
-    defer { releaseTransferSlot() }
-    if Task.isCancelled {
-      updateTransfer(id: id, state: .cancelled)
-      transferTasks.removeValue(forKey: id)
-      return
-    }
-    updateTransfer(id: id, state: .running)
-    do {
-      let service: any S3Service
-      switch operation {
-      case .upload(let source, let location):
-        service = try await s3Service(connectionID: location.connectionID)
-        let hasScope = source.startAccessingSecurityScopedResource()
-        defer { if hasScope { source.stopAccessingSecurityScopedResource() } }
-        let contentType = UTType(filenameExtension: source.pathExtension)?.preferredMIMEType
-        let destinationKey = location.prefix + source.lastPathComponent
-        try await requireRemoteDestinationAvailable(
-          service: service, bucket: location.bucket, key: destinationKey)
-        try await service.uploadFile(
-          from: source,
-          bucket: location.bucket,
-          key: destinationKey,
-          contentType: contentType,
-          progress: progressHandler(id: id)
-        )
-      case .download(let object, let location, let directory):
-        service = try await s3Service(connectionID: location.connectionID)
-        let hasScope = directory.startAccessingSecurityScopedResource()
-        defer { if hasScope { directory.stopAccessingSecurityScopedResource() } }
-        let destination = directory.appendingPathComponent(safeFilename(object.displayName))
-        guard !FileManager.default.fileExists(atPath: destination.path) else {
-          throw S3ServiceError.conflict(
-            "A file named \(destination.lastPathComponent) already exists in the destination folder.")
-        }
-        try await service.downloadFile(
-          bucket: location.bucket,
-          key: object.key,
-          to: destination,
-          progress: progressHandler(id: id)
-        )
+  private func executeTransfer(
+    _ operation: TransferOperation,
+    progress: @escaping TransferManager<TransferOperation>.Progress
+  ) async throws {
+    let service: any S3Service
+    switch operation {
+    case .upload(let source, let location, let collisionPolicy):
+      service = try await s3Service(connectionID: location.connectionID)
+      let hasScope = source.startAccessingSecurityScopedResource()
+      defer { if hasScope { source.stopAccessingSecurityScopedResource() } }
+      let contentType = UTType(filenameExtension: source.pathExtension)?.preferredMIMEType
+      let destinationKey = try await remoteDestinationKey(
+        service: service,
+        bucket: location.bucket,
+        proposedKey: location.prefix + source.lastPathComponent,
+        collisionPolicy: collisionPolicy
+      )
+      try await service.uploadFile(
+        from: source,
+        bucket: location.bucket,
+        key: destinationKey,
+        contentType: contentType
+      ) { update in
+        progress(update.fractionCompleted)
       }
-      updateTransfer(id: id, progress: 1, state: .completed)
-    } catch is CancellationError {
-      updateTransfer(id: id, state: .cancelled)
-    } catch let error as S3ServiceError where error == .cancelled {
-      updateTransfer(id: id, state: .cancelled)
-    } catch {
-      updateTransfer(id: id, state: .failed, errorMessage: error.localizedDescription)
-    }
-    transferTasks.removeValue(forKey: id)
-  }
-
-  private func progressHandler(id: UUID) -> TransferProgressHandler {
-    { [weak self] progress in
-      Task { await self?.updateTransfer(id: id, progress: progress.fractionCompleted) }
-    }
-  }
-
-  private func throwIfTransferFailed(_ ids: [UUID]) throws {
-    for id in ids {
-      guard let row = transferEntries[id]?.row else { continue }
-      if row.state == .cancelled { throw S3ServiceError.cancelled }
-      if row.state == .failed {
-        throw S3ServiceError.transport(row.errorMessage ?? "The transfer failed.")
+    case .download(let object, let location, let directory, let collisionPolicy):
+      service = try await s3Service(connectionID: location.connectionID)
+      let hasScope = directory.startAccessingSecurityScopedResource()
+      defer { if hasScope { directory.stopAccessingSecurityScopedResource() } }
+      let destination = try localDestinationURL(
+        directory: directory,
+        filename: safeFilename(object.displayName),
+        collisionPolicy: collisionPolicy
+      )
+      try await service.downloadFile(
+        bucket: location.bucket,
+        key: object.key,
+        to: destination,
+        overwrite: collisionPolicy == .replace
+      ) { update in
+        progress(update.fractionCompleted)
       }
     }
-  }
-
-  private func acquireTransferSlot() async {
-    if activeTransferCount < maximumConcurrentTransfers {
-      activeTransferCount += 1
-      return
-    }
-    await withCheckedContinuation { transferWaiters.append($0) }
-    activeTransferCount += 1
-  }
-
-  private func releaseTransferSlot() {
-    activeTransferCount -= 1
-    if !transferWaiters.isEmpty { transferWaiters.removeFirst().resume() }
-  }
-
-  private func updateTransfer(
-    id: UUID,
-    progress: Double? = nil,
-    state: TransferState? = nil,
-    errorMessage: String? = nil
-  ) {
-    guard var entry = transferEntries[id] else { return }
-    entry.row = TransferRow(
-      id: entry.row.id,
-      title: entry.row.title,
-      subtitle: entry.row.subtitle,
-      progress: progress ?? entry.row.progress,
-      state: state ?? entry.row.state,
-      errorMessage: errorMessage
-    )
-    transferEntries[id] = entry
   }
 
   private func s3Service(connectionID: UUID) async throws -> any S3Service {
@@ -444,6 +393,61 @@ actor CoreWorkbenchService: WorkbenchServing {
     }
   }
 
+  private func remoteDestinationKey(
+    service: any S3Service,
+    bucket: String,
+    proposedKey: String,
+    collisionPolicy: CollisionPolicy
+  ) async throws -> String {
+    if collisionPolicy == .replace { return proposedKey }
+    do {
+      try await requireRemoteDestinationAvailable(
+        service: service, bucket: bucket, key: proposedKey)
+      return proposedKey
+    } catch let error as S3ServiceError where error.isConflict && collisionPolicy == .keepBoth {
+      let slash = proposedKey.lastIndex(of: "/")
+      let directory = slash.map { String(proposedKey[...$0]) } ?? ""
+      let filename = slash.map { String(proposedKey[proposedKey.index(after: $0)...]) } ?? proposedKey
+      let ext = (filename as NSString).pathExtension
+      let base = (filename as NSString).deletingPathExtension
+      for suffix in 2...10_000 {
+        let candidate = directory + "\(base) \(suffix)" + (ext.isEmpty ? "" : ".\(ext)")
+        do {
+          try await requireRemoteDestinationAvailable(
+            service: service, bucket: bucket, key: candidate)
+          return candidate
+        } catch let candidateError as S3ServiceError where candidateError.isConflict {
+          continue
+        }
+      }
+      throw S3ServiceError.conflict("Could not find an available object name.")
+    }
+  }
+
+  private func localDestinationURL(
+    directory: URL,
+    filename: String,
+    collisionPolicy: CollisionPolicy
+  ) throws -> URL {
+    let proposed = directory.appendingPathComponent(filename)
+    guard FileManager.default.fileExists(atPath: proposed.path) else { return proposed }
+    switch collisionPolicy {
+    case .cancel:
+      throw S3ServiceError.conflict("A file named \(filename) already exists in the destination folder.")
+    case .replace:
+      return proposed
+    case .keepBoth:
+      let base = proposed.deletingPathExtension().lastPathComponent
+      let ext = proposed.pathExtension
+      for suffix in 2...10_000 {
+        let name = "\(base) \(suffix)" + (ext.isEmpty ? "" : ".\(ext)")
+        let candidate = directory.appendingPathComponent(name)
+        if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+      }
+      throw S3ServiceError.conflict("Could not find an available filename.")
+    }
+  }
+
   private func persistCACertificate(_ source: URL, connectionID: UUID) throws -> URL {
     let fileManager = FileManager.default
     let directory = try fileManager.url(
@@ -455,9 +459,11 @@ actor CoreWorkbenchService: WorkbenchServing {
     .appendingPathComponent("S3Workbench/Certificates", isDirectory: true)
     try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
     let fileExtension = source.pathExtension.isEmpty ? "pem" : source.pathExtension
+    if isManagedCertificate(source), source.lastPathComponent.hasPrefix(connectionID.uuidString) {
+      return source
+    }
     let destination = directory.appendingPathComponent(
-      "\(connectionID.uuidString).\(fileExtension)")
-    if source.standardizedFileURL == destination.standardizedFileURL { return destination }
+      "\(connectionID.uuidString)-\(UUID().uuidString).\(fileExtension)")
 
     let hasScope = source.startAccessingSecurityScopedResource()
     defer { if hasScope { source.stopAccessingSecurityScopedResource() } }
@@ -490,15 +496,6 @@ actor CoreWorkbenchService: WorkbenchServing {
     return filename.isEmpty || filename == "." || filename == ".." ? "S3 Object" : filename
   }
 
-  private func transferPriority(_ state: TransferState) -> Int {
-    switch state {
-    case .running: 0
-    case .queued: 1
-    case .failed: 2
-    case .cancelled: 3
-    case .completed: 4
-    }
-  }
 }
 
 extension ConnectionRow {

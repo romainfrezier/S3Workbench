@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import S3WorkbenchCore
 import SwiftUI
 
 enum AddressingMode: String, CaseIterable, Identifiable, Sendable {
@@ -29,8 +30,9 @@ struct ConnectionRow: Identifiable, Hashable, Sendable {
   var tlsPolicy: TLSPolicy
   var customCAURL: URL?
 
-  var initialLocation: (bucket: String, prefix: String)? {
-    parseAccessPath(accessPath)
+  var initialLocation: S3AccessRoot? {
+    guard let accessPath else { return nil }
+    return try? S3AccessRoot(path: accessPath)
   }
 
   var color: Color { Color(connectionHex: colorHex) }
@@ -111,7 +113,7 @@ struct ConnectionDraft: Identifiable, Sendable {
       return "Enter a port between 1 and 65535."
     }
     let trimmedAccessPath = accessPath.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !trimmedAccessPath.isEmpty, parseAccessPath(trimmedAccessPath) == nil {
+    if !trimmedAccessPath.isEmpty, (try? S3AccessRoot(path: trimmedAccessPath)) == nil {
       return "Access path must contain a bucket name, for example /etickets."
     }
     guard !region.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -189,6 +191,22 @@ struct ObjectLocation: Hashable, Sendable {
   let prefix: String
 }
 
+enum CollisionPolicy: String, CaseIterable, Identifiable, Sendable {
+  case cancel
+  case replace
+  case keepBoth
+
+  var id: Self { self }
+
+  var label: String {
+    switch self {
+    case .cancel: "Cancel"
+    case .replace: "Replace"
+    case .keepBoth: "Keep Both"
+    }
+  }
+}
+
 protocol WorkbenchServing: Sendable {
   func loadConnections() async throws -> [ConnectionRow]
   func saveConnection(_ draft: ConnectionDraft) async throws -> ConnectionRow
@@ -199,10 +217,16 @@ protocol WorkbenchServing: Sendable {
   func listObjects(at location: ObjectLocation, query: String, continuationToken: String?)
     async throws -> ObjectPage
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails
-  func upload(files: [URL], to location: ObjectLocation) async throws
-  func download(objects: [ObjectRow], from location: ObjectLocation, to directory: URL) async throws
+  func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws
+  func download(
+    objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
+    collisionPolicy: CollisionPolicy
+  ) async throws
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws
-  func move(object: ObjectRow, from location: ObjectLocation, toKey: String) async throws
+  func move(
+    object: ObjectRow, from location: ObjectLocation, toKey: String,
+    collisionPolicy: CollisionPolicy
+  ) async throws
   func presignedURL(for object: ObjectRow, at location: ObjectLocation, expiresIn: Duration)
     async throws -> URL
   func downloadForPreview(object: ObjectRow, at location: ObjectLocation) async throws -> URL
@@ -245,15 +269,21 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {
     throw WorkbenchUIError.serviceUnavailable
   }
-  func upload(files: [URL], to location: ObjectLocation) async throws {
+  func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws {
     throw WorkbenchUIError.serviceUnavailable
   }
-  func download(objects: [ObjectRow], from location: ObjectLocation, to directory: URL) async throws
+  func download(
+    objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
+    collisionPolicy: CollisionPolicy
+  ) async throws
   { throw WorkbenchUIError.serviceUnavailable }
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws {
     throw WorkbenchUIError.serviceUnavailable
   }
-  func move(object: ObjectRow, from location: ObjectLocation, toKey: String) async throws {
+  func move(
+    object: ObjectRow, from location: ObjectLocation, toKey: String,
+    collisionPolicy: CollisionPolicy
+  ) async throws {
     throw WorkbenchUIError.serviceUnavailable
   }
   func presignedURL(for object: ObjectRow, at location: ObjectLocation, expiresIn: Duration)
@@ -265,18 +295,6 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
   func transfers() async -> [TransferRow] { [] }
   func cancelTransfer(id: UUID) async {}
   func retryTransfer(id: UUID) async {}
-}
-
-private func parseAccessPath(_ value: String?) -> (bucket: String, prefix: String)? {
-  guard var path = value?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
-    return nil
-  }
-  while path.first == "/" { path.removeFirst() }
-  guard !path.isEmpty else { return nil }
-  let parts = path.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-  var prefix = parts.count == 2 ? String(parts[1]) : ""
-  if !prefix.isEmpty, !prefix.hasSuffix("/") { prefix += "/" }
-  return (String(parts[0]), prefix)
 }
 
 private extension String {
