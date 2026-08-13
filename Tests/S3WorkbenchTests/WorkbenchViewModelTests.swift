@@ -68,6 +68,37 @@ import Testing
   #expect(model.objectErrorMessage == S3ServiceError.networkUnavailable.localizedDescription)
 }
 
+@Test func objectColumnsSortPredictablyInBothDirections() {
+  let prefix = ObjectRow(
+    id: "prefix", key: "folder/", displayName: "Folder", size: 0,
+    modifiedAt: nil, storageClass: nil, isPrefix: true)
+  let alpha = ObjectRow(
+    id: "alpha", key: "alpha.txt", displayName: "Alpha", size: 10,
+    modifiedAt: Date(timeIntervalSince1970: 200), storageClass: "STANDARD", isPrefix: false)
+  let beta = ObjectRow(
+    id: "beta", key: "beta.txt", displayName: "Beta", size: 20,
+    modifiedAt: Date(timeIntervalSince1970: 100), storageClass: "GLACIER", isPrefix: false)
+  let missing = ObjectRow(
+    id: "missing", key: "missing.txt", displayName: "Missing", size: 15,
+    modifiedAt: nil, storageClass: nil, isPrefix: false)
+  let objects = [missing, beta, prefix, alpha]
+  let cases: [(ObjectSortComparator.Column, [String], [String])] = [
+    (.name, ["prefix", "alpha", "beta", "missing"], ["prefix", "missing", "beta", "alpha"]),
+    (.size, ["prefix", "alpha", "missing", "beta"], ["prefix", "beta", "missing", "alpha"]),
+    (.modified, ["prefix", "beta", "alpha", "missing"], ["prefix", "alpha", "beta", "missing"]),
+    (.storageClass, ["prefix", "beta", "alpha", "missing"], ["prefix", "alpha", "beta", "missing"]),
+  ]
+
+  for (column, ascendingIDs, descendingIDs) in cases {
+    let ascending = objects.sorted(using: [ObjectSortComparator(column: column)])
+    let descending = objects.sorted(
+      using: [ObjectSortComparator(column: column, order: .reverse)])
+
+    #expect(ascending.map(\.id) == ascendingIDs)
+    #expect(descending.map(\.id) == descendingIDs)
+  }
+}
+
 @Test func transferManagerEnforcesItsConcurrencyLimit() async throws {
   let manager = TransferManager<Int>(maximumConcurrentTransfers: 2)
   let probe = ConcurrencyProbe()

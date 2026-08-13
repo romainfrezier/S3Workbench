@@ -392,17 +392,24 @@ private struct ObjectBrowserView: View {
   let queueUpload: ([URL]) -> Void
   let requestDelete: () -> Void
   let requestRename: (String) -> Void
+  @State private var sortOrder: [ObjectSortComparator] = []
+
+  private var displayedObjects: [ObjectRow] {
+    guard !sortOrder.isEmpty else { return model.objects }
+    return model.objects.sorted(
+      using: sortOrder + [ObjectSortComparator(column: .name)])
+  }
 
   var body: some View {
-    Table(model.objects, selection: $model.selectedObjectIDs) {
-      TableColumn("Name") { object in
+    Table(displayedObjects, selection: $model.selectedObjectIDs, sortOrder: $sortOrder) {
+      TableColumn("Name", sortUsing: ObjectSortComparator(column: .name)) { object in
         Label(
           object.displayName,
           systemImage: object.isPrefix ? "folder.fill" : symbol(for: object.displayName)
         )
       }
       .width(min: 220, ideal: 420)
-      TableColumn("Size") { object in
+      TableColumn("Size", sortUsing: ObjectSortComparator(column: .size)) { object in
         Text(
           object.isPrefix
             ? "—" : ByteCountFormatter.string(fromByteCount: object.size, countStyle: .file)
@@ -410,7 +417,7 @@ private struct ObjectBrowserView: View {
         .foregroundStyle(object.isPrefix ? .tertiary : .secondary)
       }
       .width(min: 75, ideal: 100)
-      TableColumn("Modified") { object in
+      TableColumn("Modified", sortUsing: ObjectSortComparator(column: .modified)) { object in
         if let date = object.modifiedAt {
           Text(date, format: .dateTime.year().month().day().hour().minute())
         } else {
@@ -418,7 +425,8 @@ private struct ObjectBrowserView: View {
         }
       }
       .width(min: 130, ideal: 170)
-      TableColumn("Storage class") { object in
+      TableColumn("Storage class", sortUsing: ObjectSortComparator(column: .storageClass)) {
+        object in
         Text(object.storageClass ?? "—").foregroundStyle(.secondary)
       }
       .width(min: 100, ideal: 130)

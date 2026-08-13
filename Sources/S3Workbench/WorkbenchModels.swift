@@ -153,6 +153,64 @@ struct ObjectRow: Identifiable, Hashable, Sendable {
   let isPrefix: Bool
 }
 
+struct ObjectSortComparator: SortComparator, Sendable {
+  enum Column: Sendable {
+    case name
+    case size
+    case modified
+    case storageClass
+  }
+
+  let column: Column
+  var order: SortOrder = .forward
+
+  func compare(_ lhs: ObjectRow, _ rhs: ObjectRow) -> ComparisonResult {
+    if lhs.isPrefix != rhs.isPrefix {
+      return lhs.isPrefix ? .orderedAscending : .orderedDescending
+    }
+
+    switch column {
+    case .name:
+      return ordered(lhs.displayName.localizedStandardCompare(rhs.displayName))
+    case .size:
+      return ordered(compare(lhs.size, rhs.size))
+    case .modified:
+      return compare(lhs.modifiedAt, rhs.modifiedAt, using: compare)
+    case .storageClass:
+      return compare(lhs.storageClass, rhs.storageClass) {
+        $0.localizedStandardCompare($1)
+      }
+    }
+  }
+
+  private func compare<Value>(
+    _ lhs: Value?,
+    _ rhs: Value?,
+    using comparison: (Value, Value) -> ComparisonResult
+  ) -> ComparisonResult {
+    switch (lhs, rhs) {
+    case (.none, .none): .orderedSame
+    case (.none, .some): .orderedDescending
+    case (.some, .none): .orderedAscending
+    case (.some(let lhs), .some(let rhs)): ordered(comparison(lhs, rhs))
+    }
+  }
+
+  private func compare<Value: Comparable>(_ lhs: Value, _ rhs: Value) -> ComparisonResult {
+    if lhs == rhs { return .orderedSame }
+    return lhs < rhs ? .orderedAscending : .orderedDescending
+  }
+
+  private func ordered(_ comparison: ComparisonResult) -> ComparisonResult {
+    guard order == .reverse else { return comparison }
+    switch comparison {
+    case .orderedAscending: return .orderedDescending
+    case .orderedDescending: return .orderedAscending
+    case .orderedSame: return .orderedSame
+    }
+  }
+}
+
 struct ObjectPage: Sendable {
   let objects: [ObjectRow]
   let continuationToken: String?
