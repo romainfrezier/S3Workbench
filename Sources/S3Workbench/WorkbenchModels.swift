@@ -152,6 +152,11 @@ struct ObjectRow: Identifiable, Hashable, Sendable {
   let modifiedAt: Date?
   let storageClass: String?
   let isPrefix: Bool
+
+  static func id(for key: String, isPrefix: Bool) -> String {
+    let kind = isPrefix ? "prefix" : "object"
+    return "\(kind):\(Data(key.utf8).base64EncodedString())"
+  }
 }
 
 struct ObjectSortComparator: SortComparator, Sendable {
@@ -257,6 +262,18 @@ struct ObjectLocation: Hashable, Sendable {
   let connectionID: UUID
   let bucket: String
   let prefix: String
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.connectionID == rhs.connectionID
+      && lhs.bucket.utf8.elementsEqual(rhs.bucket.utf8)
+      && lhs.prefix.utf8.elementsEqual(rhs.prefix.utf8)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(connectionID)
+    hasher.combine(Data(bucket.utf8))
+    hasher.combine(Data(prefix.utf8))
+  }
 }
 
 enum CollisionPolicy: String, CaseIterable, Identifiable, Sendable {

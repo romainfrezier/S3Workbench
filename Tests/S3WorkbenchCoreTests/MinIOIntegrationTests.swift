@@ -109,6 +109,15 @@ import Testing
                 continuationToken: nil,
                 pageSize: 1
             )
+            await #expect(throws: S3ServiceError.accessDenied) {
+                _ = try await restrictedDirectService.listObjects(
+                    bucket: fixture.bucket,
+                    prefix: "outside-restricted-root/",
+                    delimiter: nil,
+                    continuationToken: nil,
+                    pageSize: 1
+                )
+            }
         }
 
         let rootPage = try await service.listObjects(

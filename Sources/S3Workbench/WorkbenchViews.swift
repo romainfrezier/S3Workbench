@@ -524,6 +524,7 @@ private struct ObjectBrowserView: View {
               title: "Searching Objects",
               secondaryMessage: "Walking the prefix tree. S3 made us do it."
             )
+            SearchCountLabel(model: model)
             Button("Cancel") { model.cancelSearch() }
               .keyboardShortcut(.cancelAction)
           }
@@ -536,6 +537,7 @@ private struct ObjectBrowserView: View {
             Text(error)
             Text(model.searchErrorSecondaryMessage ?? "The cloud returned a plot twist.")
               .foregroundStyle(.secondary)
+            SearchCountLabel(model: model)
           }
         } actions: {
           Button("Retry") { Task { await model.retrySearch() } }
@@ -544,7 +546,10 @@ private struct ObjectBrowserView: View {
         ContentUnavailableView {
           Label("Search Cancelled", systemImage: "xmark.circle")
         } description: {
-          Text("Search cancelled. The objects remain mysterious.")
+          VStack(spacing: 4) {
+            Text("Search cancelled. The objects remain mysterious.")
+            SearchCountLabel(model: model)
+          }
         } actions: {
           Button("Retry") { Task { await model.retrySearch() } }
         }
@@ -571,10 +576,14 @@ private struct ObjectBrowserView: View {
         ContentUnavailableView {
           Label(model.isSearchMode ? "No Matches" : "Empty Prefix", systemImage: "tray")
         } description: {
-          Text(
-            model.isSearchMode
-              ? "No matches. The needle may be in another bucket."
-              : "Nothing here. Impressively lightweight.")
+          if model.isSearchMode {
+            VStack(spacing: 4) {
+              Text("No matches. The needle may be in another bucket.")
+              SearchCountLabel(model: model)
+            }
+          } else {
+            Text("Nothing here. Impressively lightweight.")
+          }
         } actions: {
           if !model.isSearchMode { Button("Upload Files") { requestUpload() } }
         }
@@ -681,6 +690,20 @@ private struct SearchStatusBar: View {
     .padding(.horizontal, 12)
     .padding(.vertical, 7)
     .background(.bar)
+  }
+}
+
+private struct SearchCountLabel: View {
+  @Bindable var model: WorkbenchViewModel
+
+  var body: some View {
+    Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .accessibilityLabel(
+        "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
+      )
+      .accessibilityAddTraits(.updatesFrequently)
   }
 }
 
