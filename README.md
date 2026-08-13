@@ -20,6 +20,20 @@
 > [!IMPORTANT]
 > S3Workbench is S3-compatible first, not AWS-specific. Every connection keeps its own endpoint, region, addressing policy, TLS policy, and Keychain-protected credentials.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/object-browser.png" width="1120" alt="S3Workbench browsing a local S3 bucket with the metadata inspector open">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/recursive-search.png" width="1120" alt="S3Workbench showing recursive search results with paths and scanned-object counters">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/connection-settings.png" width="560" alt="S3Workbench connection settings for an S3-compatible endpoint">
+</p>
+
 ## Why S3Workbench?
 
 Most desktop S3 tools either assume AWS endpoints or feel like generic file-transfer utilities. S3Workbench is built for people who move between local MinIO, private infrastructure, and hosted object storage every day.
