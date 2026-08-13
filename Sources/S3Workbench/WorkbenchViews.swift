@@ -179,7 +179,14 @@ struct WorkbenchRootView: View {
     }
     .navigationTitle("S3 Workbench")
     .overlay {
-      if model.connections.isEmpty, !model.isLoadingConnections {
+      if model.isLoadingConnections, model.connections.isEmpty {
+        if model.isConnectionLoadingIndicatorVisible {
+          InitialLoadingView(
+            title: "Loading Connections",
+            secondaryMessage: "Loading saved connections…"
+          )
+        }
+      } else if model.connections.isEmpty {
         ContentUnavailableView {
           Label("No Connections", systemImage: "externaldrive.badge.plus")
         } description: {
@@ -366,12 +373,21 @@ private struct BucketBrowserView: View {
     .navigationTitle(model.selectedConnection?.name ?? "Buckets")
     .overlay {
       if model.isLoadingBuckets, model.buckets.isEmpty {
-        ProgressView("Loading buckets…")
+        if model.isBucketLoadingIndicatorVisible {
+          InitialLoadingView(
+            title: "Loading Buckets",
+            secondaryMessage: "Asking S3 where it put everything…"
+          )
+        }
       } else if let error = model.bucketErrorMessage, model.buckets.isEmpty {
         ContentUnavailableView {
           Label("Can’t Load Buckets", systemImage: "exclamationmark.triangle")
         } description: {
-          Text(error)
+          VStack(spacing: 4) {
+            Text(error)
+            Text(model.bucketErrorSecondaryMessage ?? "The cloud returned a plot twist.")
+              .foregroundStyle(.secondary)
+          }
         } actions: {
           Button("Retry") { Task { await model.reloadConnection() } }
         }
@@ -383,8 +399,13 @@ private struct BucketBrowserView: View {
     }
     .safeAreaInset(edge: .top) {
       if let error = model.bucketErrorMessage, !model.buckets.isEmpty {
-        RefreshErrorBanner(message: error) { Task { await model.reloadConnection() } }
-      } else if model.isLoadingBuckets, !model.buckets.isEmpty {
+        RefreshErrorBanner(
+          message: error,
+          secondaryMessage: model.bucketErrorSecondaryMessage
+        ) { Task { await model.reloadConnection() } }
+      } else if model.isLoadingBuckets, model.isBucketLoadingIndicatorVisible,
+        !model.buckets.isEmpty
+      {
         RefreshProgressBanner(title: "Refreshing buckets…")
       }
     }
@@ -497,15 +518,15 @@ private struct ObjectBrowserView: View {
     }
     .overlay {
       if model.isSearching, model.objects.isEmpty {
-        ContentUnavailableView {
-          VStack(spacing: 12) {
-            ProgressView()
-            Text("Searching Objects").font(.headline)
+        if model.isSearchLoadingIndicatorVisible {
+          VStack(spacing: 16) {
+            InitialLoadingView(
+              title: "Searching Objects",
+              secondaryMessage: "Walking the prefix tree. S3 made us do it."
+            )
+            Button("Cancel") { model.cancelSearch() }
+              .keyboardShortcut(.cancelAction)
           }
-        } description: {
-          Text("Walking the prefix tree. S3 made us do it.")
-        } actions: {
-          Button("Cancel") { model.cancelSearch() }
         }
       } else if let error = model.searchErrorMessage, model.objects.isEmpty {
         ContentUnavailableView {
@@ -528,12 +549,21 @@ private struct ObjectBrowserView: View {
           Button("Retry") { Task { await model.retrySearch() } }
         }
       } else if model.isLoadingObjects, model.objects.isEmpty {
-        ProgressView("Loading objects…")
+        if model.isObjectLoadingIndicatorVisible {
+          InitialLoadingView(
+            title: "Loading Prefix",
+            secondaryMessage: "Following the slashes…"
+          )
+        }
       } else if let error = model.objectErrorMessage, model.objects.isEmpty {
         ContentUnavailableView {
           Label("Can’t Load Objects", systemImage: "exclamationmark.triangle")
         } description: {
-          Text(error)
+          VStack(spacing: 4) {
+            Text(error)
+            Text(model.objectErrorSecondaryMessage ?? "The cloud returned a plot twist.")
+              .foregroundStyle(.secondary)
+          }
         } actions: {
           Button("Retry") { Task { await model.reloadObjects() } }
         }
@@ -559,8 +589,13 @@ private struct ObjectBrowserView: View {
       } else if !model.isSearchMode, let error = model.objectErrorMessage,
         !model.objects.isEmpty
       {
-        RefreshErrorBanner(message: error) { Task { await model.reloadObjects() } }
-      } else if !model.isSearchMode, model.isLoadingObjects, !model.objects.isEmpty {
+        RefreshErrorBanner(
+          message: error,
+          secondaryMessage: model.objectErrorSecondaryMessage
+        ) { Task { await model.reloadObjects() } }
+      } else if !model.isSearchMode, model.isLoadingObjects,
+        model.isObjectLoadingIndicatorVisible, !model.objects.isEmpty
+      {
         RefreshProgressBanner(title: "Refreshing objects…")
       }
     }
@@ -581,8 +616,20 @@ private struct ObjectBrowserView: View {
     .safeAreaInset(edge: .bottom) {
       if model.isSearchMode, !model.objects.isEmpty {
         SearchStatusBar(model: model)
+      } else if !model.isSearchMode, let error = model.paginationErrorMessage {
+        RefreshErrorBanner(
+          message: error,
+          secondaryMessage: model.paginationErrorSecondaryMessage
+        ) { Task { await model.loadMore() } }
       } else if !model.isSearchMode, model.continuationToken != nil {
-        Button(model.isLoadingMore ? "Loading…" : "Load More") { Task { await model.loadMore() } }
+        Button { Task { await model.loadMore() } } label: {
+          HStack(spacing: 8) {
+            if model.isPaginationLoadingIndicatorVisible {
+              ProgressView().controlSize(.small)
+            }
+            Text(model.isPaginationLoadingIndicatorVisible ? "Loading…" : "Load More")
+          }
+        }
           .disabled(model.isLoadingMore)
           .padding(8)
           .frame(maxWidth: .infinity)
@@ -608,19 +655,25 @@ private struct SearchStatusBar: View {
 
   var body: some View {
     HStack(spacing: 8) {
-      if model.isSearching { ProgressView().controlSize(.small) }
+      if model.isSearchLoadingIndicatorVisible { ProgressView().controlSize(.small) }
       VStack(alignment: .leading, spacing: 2) {
         Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
           .font(.callout)
+          .accessibilityLabel(
+            "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
+          )
+          .accessibilityAddTraits(.updatesFrequently)
         if model.searchWasCancelled {
           Text("Search cancelled. The objects remain mysterious.")
             .font(.caption)
             .foregroundStyle(.secondary)
+            .accessibilityAddTraits(.updatesFrequently)
         }
       }
       Spacer()
       if model.isSearching {
         Button("Cancel") { model.cancelSearch() }
+          .keyboardShortcut(.cancelAction)
       } else if model.searchWasCancelled {
         Button("Retry") { Task { await model.retrySearch() } }
       }
@@ -628,9 +681,25 @@ private struct SearchStatusBar: View {
     .padding(.horizontal, 12)
     .padding(.vertical, 7)
     .background(.bar)
+  }
+}
+
+private struct InitialLoadingView: View {
+  let title: String
+  let secondaryMessage: String
+
+  var body: some View {
+    VStack(spacing: 8) {
+      ProgressView()
+      Text(title).font(.headline)
+      Text(secondaryMessage)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+    }
     .accessibilityElement(children: .combine)
-    .accessibilityLabel(
-      "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches")
+    .accessibilityLabel("\(title). \(secondaryMessage)")
+    .accessibilityValue("In progress")
+    .accessibilityAddTraits(.updatesFrequently)
   }
 }
 
@@ -646,6 +715,8 @@ private struct RefreshProgressBanner: View {
     .padding(.horizontal, 12)
     .padding(.vertical, 7)
     .background(.bar)
+    .accessibilityElement(children: .combine)
+    .accessibilityAddTraits(.updatesFrequently)
   }
 }
 
@@ -664,6 +735,8 @@ private struct RefreshErrorBanner: View {
         }
       }
       .lineLimit(2)
+      .accessibilityElement(children: .combine)
+      .accessibilityAddTraits(.updatesFrequently)
       Spacer()
       Button("Retry", action: retry)
     }

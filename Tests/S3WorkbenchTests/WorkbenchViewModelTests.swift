@@ -44,7 +44,11 @@ import Testing
 
   #expect(model.objects.isEmpty)
   #expect(model.objectErrorMessage == S3ServiceError.accessDenied.localizedDescription)
+  #expect(
+    model.objectErrorSecondaryMessage
+      == "S3 said nope. Check the credentials and permissions.")
   #expect(!model.isLoadingObjects)
+  #expect(!model.isObjectLoadingIndicatorVisible)
 }
 
 @MainActor
@@ -67,6 +71,73 @@ import Testing
 
   #expect(model.objects == [object])
   #expect(model.objectErrorMessage == S3ServiceError.networkUnavailable.localizedDescription)
+  #expect(
+    model.objectErrorSecondaryMessage
+      == "The network took an unscheduled coffee break.")
+}
+
+@MainActor
+@Test func failedPaginationKeepsRowsAndOffersAnInlineRetry() async throws {
+  let object = ObjectRow(
+    id: "object:report.txt", key: "report.txt", displayName: "report.txt", relativePath: "",
+    size: 12,
+    modifiedAt: nil, storageClass: nil, isPrefix: false)
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(ObjectPage(objects: [object], continuationToken: "next"))
+  )
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "private"
+  await model.reloadObjects()
+  await service.setListObjectsResult(.failure(S3ServiceError.networkUnavailable))
+
+  await model.loadMore()
+
+  #expect(model.objects == [object])
+  #expect(model.continuationToken == "next")
+  #expect(model.paginationErrorMessage == S3ServiceError.networkUnavailable.localizedDescription)
+  #expect(
+    model.paginationErrorSecondaryMessage
+      == "The network took an unscheduled coffee break.")
+  #expect(model.errorMessage == nil)
+  #expect(!model.isLoadingMore)
+  #expect(!model.isPaginationLoadingIndicatorVisible)
+}
+
+@MainActor
+@Test func slowSearchDelaysItsLoadingIndicatorAndClearsItOnCancellation() async throws {
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty)
+  ) { _, _, _ in
+    try await Task.sleep(for: .seconds(5))
+    return ObjectSearchPage(objects: [], scannedObjectCount: 0, continuationToken: nil)
+  }
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.searchQuery = "needle"
+
+  let clock = ContinuousClock()
+  let startedAt = clock.now
+  let search = Task { await model.startSearch() }
+  #expect(await waitForSearchCall(service))
+  #expect(!model.isSearchLoadingIndicatorVisible)
+
+  while !model.isSearchLoadingIndicatorVisible,
+    startedAt.duration(to: clock.now) < .seconds(1)
+  {
+    try await Task.sleep(for: .milliseconds(10))
+  }
+
+  #expect(model.isSearchLoadingIndicatorVisible)
+  #expect(startedAt.duration(to: clock.now) >= .milliseconds(200))
+
+  model.cancelSearch()
+  await search.value
+  #expect(!model.isSearching)
+  #expect(!model.isSearchLoadingIndicatorVisible)
 }
 
 @Test func recursiveSearchMatchesTheCompleteRelativeKeyWithoutNormalizingIt() throws {
@@ -131,6 +202,7 @@ import Testing
   #expect(model.searchScannedObjectCount == 1_007)
   #expect(model.searchMatchCount == 2)
   #expect(!model.isSearching)
+  #expect(!model.isSearchLoadingIndicatorVisible)
 }
 
 @MainActor

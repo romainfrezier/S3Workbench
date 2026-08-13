@@ -29,7 +29,11 @@ final class WorkbenchViewModel {
   var isDropTargeted = false
   var errorMessage: String?
   var bucketErrorMessage: String?
+  private(set) var bucketErrorSecondaryMessage: String?
   var objectErrorMessage: String?
+  private(set) var objectErrorSecondaryMessage: String?
+  private(set) var paginationErrorMessage: String?
+  private(set) var paginationErrorSecondaryMessage: String?
   var previewURL: URL? {
     didSet {
       guard oldValue != previewURL, let oldValue, isManagedPreview(oldValue) else { return }
@@ -46,6 +50,9 @@ final class WorkbenchViewModel {
   private var searchTask: Task<Void, Never>?
   private var nextSearchContinuationToken: String?
   private var seenSearchContinuationTokens = Set<String>()
+  private var visibleLoadingIndicators = Set<LoadingIndicator>()
+  @ObservationIgnored private var loadingIndicatorTasks: [LoadingIndicator: Task<Void, Never>] = [:]
+  @ObservationIgnored private var loadingIndicatorIDs: [LoadingIndicator: UUID] = [:]
 
   init(service: any WorkbenchServing) {
     self.service = service
@@ -59,6 +66,15 @@ final class WorkbenchViewModel {
   var accessRootPrefix: String { accessRoot?.prefix ?? "" }
   var isSearchMode: Bool { activeSearchQuery != nil }
   var searchMatchCount: Int { isSearchMode ? objects.count : 0 }
+  var isConnectionLoadingIndicatorVisible: Bool {
+    visibleLoadingIndicators.contains(.connections)
+  }
+  var isBucketLoadingIndicatorVisible: Bool { visibleLoadingIndicators.contains(.buckets) }
+  var isObjectLoadingIndicatorVisible: Bool { visibleLoadingIndicators.contains(.objects) }
+  var isPaginationLoadingIndicatorVisible: Bool {
+    visibleLoadingIndicators.contains(.pagination)
+  }
+  var isSearchLoadingIndicatorVisible: Bool { visibleLoadingIndicators.contains(.search) }
 
   var selectedObjects: [ObjectRow] {
     objects.filter { selectedObjectIDs.contains($0.id) }
@@ -81,7 +97,10 @@ final class WorkbenchViewModel {
 
   func start() async {
     isLoadingConnections = true
-    defer { isLoadingConnections = false }
+    let loadingID = startLoadingIndicator(.connections)
+    defer {
+      if stopLoadingIndicator(.connections, id: loadingID) { isLoadingConnections = false }
+    }
     do {
       connections = try await service.loadConnections()
       selectedConnectionID = selectedConnectionID ?? connections.first?.id
@@ -101,6 +120,7 @@ final class WorkbenchViewModel {
     history = [""]
     historyIndex = 0
     bucketErrorMessage = nil
+    bucketErrorSecondaryMessage = nil
     guard let selectedConnectionID else {
       buckets = []
       return
@@ -115,7 +135,10 @@ final class WorkbenchViewModel {
     }
     if loadedBucketConnectionID != selectedConnectionID { buckets = [] }
     isLoadingBuckets = true
-    defer { isLoadingBuckets = false }
+    let loadingID = startLoadingIndicator(.buckets)
+    defer {
+      if stopLoadingIndicator(.buckets, id: loadingID) { isLoadingBuckets = false }
+    }
     do {
       let loadedBuckets = try await service.listBuckets(connectionID: selectedConnectionID)
       guard self.selectedConnectionID == selectedConnectionID else { return }
@@ -124,6 +147,7 @@ final class WorkbenchViewModel {
     } catch {
       guard self.selectedConnectionID == selectedConnectionID else { return }
       bucketErrorMessage = error.localizedDescription
+      bucketErrorSecondaryMessage = serviceFailureCopy(for: error)
     }
   }
 
@@ -198,8 +222,14 @@ final class WorkbenchViewModel {
     objectDetails = nil
     continuationToken = nil
     objectErrorMessage = nil
+    objectErrorSecondaryMessage = nil
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
     isLoadingObjects = true
-    defer { isLoadingObjects = false }
+    let loadingID = startLoadingIndicator(.objects)
+    defer {
+      if stopLoadingIndicator(.objects, id: loadingID) { isLoadingObjects = false }
+    }
     do {
       let page = try await service.listObjects(at: location, continuationToken: nil)
       guard self.location == location, !isSearchMode else { return }
@@ -209,6 +239,7 @@ final class WorkbenchViewModel {
     } catch {
       guard self.location == location, !isSearchMode else { return }
       objectErrorMessage = error.localizedDescription
+      objectErrorSecondaryMessage = serviceFailureCopy(for: error)
     }
   }
 
@@ -228,11 +259,15 @@ final class WorkbenchViewModel {
     objectDetails = nil
     continuationToken = nil
     objectErrorMessage = nil
+    objectErrorSecondaryMessage = nil
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
     searchScannedObjectCount = 0
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
     isSearching = true
+    startLoadingIndicator(.search, id: context.id)
 
     let task = Task { [weak self] in
       guard let self else { return }
@@ -252,6 +287,9 @@ final class WorkbenchViewModel {
     searchTask?.cancel()
     isSearching = false
     searchWasCancelled = true
+    if let context = activeSearchContext {
+      stopLoadingIndicator(.search, id: context.id)
+    }
   }
 
   func retrySearch() async {
@@ -266,6 +304,7 @@ final class WorkbenchViewModel {
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
     isSearching = true
+    startLoadingIndicator(.search, id: retryContext.id)
     let task = Task { [weak self] in
       guard let self else { return }
       await self.runSearch(retryContext)
@@ -296,15 +335,22 @@ final class WorkbenchViewModel {
 
   func loadMore() async {
     guard !isSearchMode, let location, let continuationToken, !isLoadingMore else { return }
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
     isLoadingMore = true
-    defer { isLoadingMore = false }
+    let loadingID = startLoadingIndicator(.pagination)
+    defer {
+      if stopLoadingIndicator(.pagination, id: loadingID) { isLoadingMore = false }
+    }
     do {
       let page = try await service.listObjects(at: location, continuationToken: continuationToken)
       guard self.location == location, !isSearchMode else { return }
       objects.append(contentsOf: page.objects)
       self.continuationToken = page.continuationToken
     } catch {
-      errorMessage = error.localizedDescription
+      guard self.location == location, !isSearchMode else { return }
+      paginationErrorMessage = error.localizedDescription
+      paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
     }
   }
 
@@ -478,6 +524,7 @@ final class WorkbenchViewModel {
       }
       isSearching = false
       searchTask = nil
+      stopLoadingIndicator(.search, id: context.id)
     } catch {
       guard isActive(context) else {
         discardStaleSearch(context)
@@ -485,11 +532,12 @@ final class WorkbenchViewModel {
       }
       isSearching = false
       searchTask = nil
+      stopLoadingIndicator(.search, id: context.id)
       if error is CancellationError || error as? S3ServiceError == .cancelled {
         searchWasCancelled = true
       } else {
         searchErrorMessage = error.localizedDescription
-        searchErrorSecondaryMessage = searchFailureCopy(for: error)
+        searchErrorSecondaryMessage = serviceFailureCopy(for: error)
       }
     }
   }
@@ -500,6 +548,7 @@ final class WorkbenchViewModel {
 
   private func discardStaleSearch(_ context: ObjectSearchContext) {
     guard activeSearchContext == context else { return }
+    stopLoadingIndicator(.search, id: context.id)
     searchTask = nil
     activeSearchContext = nil
     activeSearchQuery = nil
@@ -516,6 +565,9 @@ final class WorkbenchViewModel {
   }
 
   private func resetSearch(clearQuery: Bool) {
+    if let context = activeSearchContext {
+      stopLoadingIndicator(.search, id: context.id)
+    }
     searchTask?.cancel()
     searchTask = nil
     activeSearchContext = nil
@@ -536,7 +588,7 @@ final class WorkbenchViewModel {
     return candidate.hasPrefix(accessRootPrefix) ? candidate : accessRootPrefix
   }
 
-  private func searchFailureCopy(for error: Error) -> String {
+  private func serviceFailureCopy(for error: Error) -> String {
     switch error as? S3ServiceError {
     case .networkUnavailable:
       "The network took an unscheduled coffee break."
@@ -546,6 +598,43 @@ final class WorkbenchViewModel {
       "The cloud returned a plot twist."
     }
   }
+
+  @discardableResult
+  private func startLoadingIndicator(
+    _ indicator: LoadingIndicator, id: UUID = UUID()
+  ) -> UUID {
+    loadingIndicatorTasks[indicator]?.cancel()
+    loadingIndicatorIDs[indicator] = id
+    guard !visibleLoadingIndicators.contains(indicator) else { return id }
+    loadingIndicatorTasks[indicator] = Task { [weak self] in
+      do {
+        try await Task.sleep(for: .milliseconds(200))
+      } catch {
+        return
+      }
+      guard let self, loadingIndicatorIDs[indicator] == id else { return }
+      visibleLoadingIndicators.insert(indicator)
+    }
+    return id
+  }
+
+  @discardableResult
+  private func stopLoadingIndicator(_ indicator: LoadingIndicator, id: UUID) -> Bool {
+    guard loadingIndicatorIDs[indicator] == id else { return false }
+    loadingIndicatorTasks[indicator]?.cancel()
+    loadingIndicatorTasks[indicator] = nil
+    loadingIndicatorIDs[indicator] = nil
+    visibleLoadingIndicators.remove(indicator)
+    return true
+  }
+}
+
+private enum LoadingIndicator: Hashable, Sendable {
+  case connections
+  case buckets
+  case objects
+  case pagination
+  case search
 }
 
 private struct ObjectLoadContext: Equatable {
