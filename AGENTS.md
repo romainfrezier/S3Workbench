@@ -1,9 +1,11 @@
 # Repository instructions
 
-Read [ROADMAP.md](ROADMAP.md) before proposing or implementing a feature. It is
-the product direction, not permission to implement neighboring items. Keep each
-change limited to the user's request and update the roadmap only when an
-explicit product decision or feature status changes.
+For planned features, use the linked GitHub issue as the implementation
+contract. Maintainer-approved work is listed in the
+[roadmap backlog](https://github.com/romainfrezier/S3Workbench/issues?q=is%3Aissue%20state%3Aopen%20label%3Aroadmap).
+GitHub Discussions are discovery, not permission to implement. Keep each change
+limited to the user's request and its issue; do not expand into neighboring
+items.
 
 ## Product guardrails
 
@@ -15,7 +17,11 @@ explicit product decision or feature status changes.
   Never normalize object keys, load large objects entirely into memory, or let
   cancellation append stale results.
 - For recursive search, preserve complete pagination, bounded memory,
-  progressive results, cancellation, and the P0 behavior in the roadmap.
+  progressive results and counters, cancellation, restricted access roots,
+  reveal-in-prefix behavior, and stale-result rejection.
+- Keep object-table sorting local to the currently loaded rows. It must not add
+  an S3 request or a second pagination model, and it must preserve selection,
+  search, and pagination state.
 - Keep existing data visible during refreshes. Use separate loading states and
   non-blocking errors instead of blanking unrelated content or showing modal
   alerts.

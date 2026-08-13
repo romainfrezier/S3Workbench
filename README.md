@@ -120,10 +120,23 @@ The integration environment is isolated, pinned by container digest, and removed
 
 ## Project status
 
-S3Workbench is an early public release. The current product priority is fast,
-cancellable recursive search with clear, non-blocking loading states. See the
-[product roadmap](ROADMAP.md) for priorities, acceptance criteria, and explicit
-non-goals.
+S3Workbench is an early public release. Maintainer-approved work is tracked in
+[open roadmap issues](https://github.com/romainfrezier/S3Workbench/issues?q=is%3Aissue%20state%3Aopen%20label%3Aroadmap).
+Questions and ideas that are not yet ready for implementation belong in
+[GitHub Discussions](https://github.com/romainfrezier/S3Workbench/discussions).
+
+## Deliberate non-goals
+
+S3Workbench intentionally remains an object browser rather than a storage
+administration or synchronization suite. The following are not planned for now:
+
+- local-to-S3 synchronization or mirroring;
+- bucket administration, policies, lifecycle, or replication;
+- regex, glob, saved queries, advanced filters, or a local search index;
+- transfer resumption after the application exits;
+- full AWS profile, SSO, or credential-provider-chain support;
+- object-version browsing and restoration;
+- expanded presigned URL workflows.
 
 ## Contributing
 
