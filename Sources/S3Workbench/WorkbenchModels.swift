@@ -147,14 +147,87 @@ struct ObjectRow: Identifiable, Hashable, Sendable {
   let id: String
   let key: String
   let displayName: String
+  let relativePath: String
   let size: Int64
   let modifiedAt: Date?
   let storageClass: String?
   let isPrefix: Bool
+
+  static func id(for key: String, isPrefix: Bool) -> String {
+    let kind = isPrefix ? "prefix" : "object"
+    return "\(kind):\(Data(key.utf8).base64EncodedString())"
+  }
+}
+
+struct ObjectSortComparator: SortComparator, Sendable {
+  enum Column: Sendable {
+    case name
+    case size
+    case modified
+    case storageClass
+  }
+
+  let column: Column
+  var order: SortOrder = .forward
+
+  func compare(_ lhs: ObjectRow, _ rhs: ObjectRow) -> ComparisonResult {
+    if lhs.isPrefix != rhs.isPrefix {
+      return lhs.isPrefix ? .orderedAscending : .orderedDescending
+    }
+
+    switch column {
+    case .name:
+      let nameComparison = lhs.displayName.localizedStandardCompare(rhs.displayName)
+      return ordered(
+        nameComparison == .orderedSame
+          ? lhs.key.localizedStandardCompare(rhs.key) : nameComparison)
+    case .size:
+      return ordered(compare(lhs.size, rhs.size))
+    case .modified:
+      return compare(lhs.modifiedAt, rhs.modifiedAt, using: compare)
+    case .storageClass:
+      return compare(lhs.storageClass, rhs.storageClass) {
+        $0.localizedStandardCompare($1)
+      }
+    }
+  }
+
+  private func compare<Value>(
+    _ lhs: Value?,
+    _ rhs: Value?,
+    using comparison: (Value, Value) -> ComparisonResult
+  ) -> ComparisonResult {
+    switch (lhs, rhs) {
+    case (.none, .none): .orderedSame
+    case (.none, .some): .orderedDescending
+    case (.some, .none): .orderedAscending
+    case (.some(let lhs), .some(let rhs)): ordered(comparison(lhs, rhs))
+    }
+  }
+
+  private func compare<Value: Comparable>(_ lhs: Value, _ rhs: Value) -> ComparisonResult {
+    if lhs == rhs { return .orderedSame }
+    return lhs < rhs ? .orderedAscending : .orderedDescending
+  }
+
+  private func ordered(_ comparison: ComparisonResult) -> ComparisonResult {
+    guard order == .reverse else { return comparison }
+    switch comparison {
+    case .orderedAscending: return .orderedDescending
+    case .orderedDescending: return .orderedAscending
+    case .orderedSame: return .orderedSame
+    }
+  }
 }
 
 struct ObjectPage: Sendable {
   let objects: [ObjectRow]
+  let continuationToken: String?
+}
+
+struct ObjectSearchPage: Sendable {
+  let objects: [ObjectRow]
+  let scannedObjectCount: Int
   let continuationToken: String?
 }
 
@@ -189,6 +262,18 @@ struct ObjectLocation: Hashable, Sendable {
   let connectionID: UUID
   let bucket: String
   let prefix: String
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.connectionID == rhs.connectionID
+      && lhs.bucket.utf8.elementsEqual(rhs.bucket.utf8)
+      && lhs.prefix.utf8.elementsEqual(rhs.prefix.utf8)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(connectionID)
+    hasher.combine(Data(bucket.utf8))
+    hasher.combine(Data(prefix.utf8))
+  }
 }
 
 enum CollisionPolicy: String, CaseIterable, Identifiable, Sendable {
@@ -214,8 +299,11 @@ protocol WorkbenchServing: Sendable {
   func removeConnection(id: UUID) async throws
   func testConnection(_ draft: ConnectionDraft) async throws
   func listBuckets(connectionID: UUID) async throws -> [BucketRow]
-  func listObjects(at location: ObjectLocation, query: String, continuationToken: String?)
-    async throws -> ObjectPage
+  func listObjects(at location: ObjectLocation, continuationToken: String?) async throws
+    -> ObjectPage
+  func searchObjects(
+    at location: ObjectLocation, query: String, continuationToken: String?
+  ) async throws -> ObjectSearchPage
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails
   func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws
   func download(
@@ -263,9 +351,12 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
   func listBuckets(connectionID: UUID) async throws -> [BucketRow] {
     throw WorkbenchUIError.serviceUnavailable
   }
-  func listObjects(at location: ObjectLocation, query: String, continuationToken: String?)
-    async throws -> ObjectPage
+  func listObjects(at location: ObjectLocation, continuationToken: String?) async throws
+    -> ObjectPage
   { throw WorkbenchUIError.serviceUnavailable }
+  func searchObjects(
+    at location: ObjectLocation, query: String, continuationToken: String?
+  ) async throws -> ObjectSearchPage { throw WorkbenchUIError.serviceUnavailable }
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {
     throw WorkbenchUIError.serviceUnavailable
   }

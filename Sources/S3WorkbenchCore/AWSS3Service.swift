@@ -75,6 +75,7 @@ public actor AWSS3Service: S3Service {
             _ = try await listObjects(
                 bucket: accessPath.bucket,
                 prefix: accessPath.prefix,
+                delimiter: "/",
                 continuationToken: nil,
                 pageSize: 1
             )
@@ -106,6 +107,7 @@ public actor AWSS3Service: S3Service {
     public func listObjects(
         bucket: String,
         prefix: String,
+        delimiter: String?,
         continuationToken: String?,
         pageSize: Int
     ) async throws -> S3ObjectPage {
@@ -117,7 +119,7 @@ public actor AWSS3Service: S3Service {
             let output = try await client.listObjectsV2(input: ListObjectsV2Input(
                 bucket: bucket,
                 continuationToken: continuationToken,
-                delimiter: "/",
+                delimiter: delimiter,
                 encodingType: .url,
                 maxKeys: pageSize,
                 prefix: prefix

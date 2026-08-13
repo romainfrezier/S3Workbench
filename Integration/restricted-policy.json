@@ -3,8 +3,18 @@
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Action": ["s3:GetBucketLocation"],
       "Resource": ["arn:aws:s3:::__BUCKET__"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::__BUCKET__"],
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["integration/*"]
+        }
+      }
     },
     {
       "Effect": "Allow",
@@ -15,7 +25,7 @@
         "s3:AbortMultipartUpload",
         "s3:ListMultipartUploadParts"
       ],
-      "Resource": ["arn:aws:s3:::__BUCKET__/*"]
+      "Resource": ["arn:aws:s3:::__BUCKET__/integration/*"]
     }
   ]
 }

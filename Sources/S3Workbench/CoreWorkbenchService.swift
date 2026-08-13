@@ -3,6 +3,10 @@ import S3WorkbenchCore
 import UniformTypeIdentifiers
 
 actor CoreWorkbenchService: WorkbenchServing {
+  typealias ConnectionProfilesLoader = @Sendable () async throws -> [ConnectionProfile]
+  typealias S3ServiceFactory = @Sendable (ConnectionProfile, S3Credentials) async throws
+    -> any S3Service
+
   enum TransferOperation: Sendable {
     case upload(source: URL, location: ObjectLocation, collisionPolicy: CollisionPolicy)
     case download(
@@ -24,16 +28,38 @@ actor CoreWorkbenchService: WorkbenchServing {
     }
   }
 
+  private struct S3ServiceContext: Sendable {
+    let service: any S3Service
+    let accessRoot: S3AccessRoot?
+  }
+
+  private struct S3ServiceContextLoad: Sendable {
+    let id: UUID
+    let generation: UInt64
+    let task: Task<S3ServiceContext, Error>
+  }
+
   private let connectionStore: ConnectionStore
   private let credentialStore: any CredentialStore
+  private let connectionProfilesLoader: ConnectionProfilesLoader
+  private let s3ServiceFactory: S3ServiceFactory
   private let transferManager = TransferManager<TransferOperation>(maximumConcurrentTransfers: 4)
+  private var s3ServiceContexts: [UUID: S3ServiceContext] = [:]
+  private var s3ServiceContextLoads: [UUID: S3ServiceContextLoad] = [:]
+  private var s3ServiceContextGenerations: [UUID: UInt64] = [:]
 
   init(
     connectionStore: ConnectionStore,
-    credentialStore: any CredentialStore = KeychainCredentialStore()
+    credentialStore: any CredentialStore = KeychainCredentialStore(),
+    connectionProfilesLoader: ConnectionProfilesLoader? = nil,
+    s3ServiceFactory: @escaping S3ServiceFactory = { profile, credentials in
+      try AWSS3Service(profile: profile, credentials: credentials)
+    }
   ) {
     self.connectionStore = connectionStore
     self.credentialStore = credentialStore
+    self.connectionProfilesLoader = connectionProfilesLoader ?? { try await connectionStore.load() }
+    self.s3ServiceFactory = s3ServiceFactory
   }
 
   static func live() throws -> CoreWorkbenchService {
@@ -47,6 +73,8 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   func saveConnection(_ draft: ConnectionDraft) async throws -> ConnectionRow {
+    invalidateS3ServiceContext(for: draft.id)
+    defer { invalidateS3ServiceContext(for: draft.id) }
     let previousProfile = try await connectionStore.load().first { $0.id == draft.id }
     let previousCredentials = try credentialStore.credentials(for: draft.id)
     _ = try draft.profile()
@@ -126,6 +154,8 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   func removeConnection(id: UUID) async throws {
+    invalidateS3ServiceContext(for: id)
+    defer { invalidateS3ServiceContext(for: id) }
     let profiles = try await connectionStore.load()
     let profile = profiles.first { $0.id == id }
     let certificateURL = profile?.customCACertificateURL
@@ -160,29 +190,30 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   func listBuckets(connectionID: UUID) async throws -> [BucketRow] {
-    try await s3Service(connectionID: connectionID).listBuckets().map {
+    let context = try await s3ServiceContext(connectionID: connectionID)
+    guard context.accessRoot == nil else { throw S3ServiceError.accessDenied }
+    return try await context.service.listBuckets().map {
       BucketRow(name: $0.name, creationDate: $0.creationDate)
     }
   }
 
   func listObjects(
     at location: ObjectLocation,
-    query: String,
     continuationToken: String?
   ) async throws -> ObjectPage {
-    let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-    let effectivePrefix = location.prefix + query
-    let page = try await s3Service(connectionID: location.connectionID).listObjects(
+    let page = try await s3Service(at: location).listObjects(
       bucket: location.bucket,
-      prefix: effectivePrefix,
+      prefix: location.prefix,
+      delimiter: "/",
       continuationToken: continuationToken,
       pageSize: 1_000
     )
     let prefixes = page.prefixes.map {
       ObjectRow(
-        id: "prefix:\($0)",
+        id: ObjectRow.id(for: $0, isPrefix: true),
         key: $0,
         displayName: relativeName($0, prefix: location.prefix),
+        relativePath: "",
         size: 0,
         modifiedAt: nil,
         storageClass: nil,
@@ -190,23 +221,119 @@ actor CoreWorkbenchService: WorkbenchServing {
       )
     }
     let objects = page.objects
-      .filter { $0.key != location.prefix }
+      .filter { !Self.bytesEqual($0.key, location.prefix) }
       .map {
         ObjectRow(
-          id: "object:\($0.key)",
+          id: ObjectRow.id(for: $0.key, isPrefix: false),
           key: $0.key,
           displayName: relativeName($0.key, prefix: location.prefix),
+          relativePath: "",
           size: $0.size,
           modifiedAt: $0.lastModified,
           storageClass: $0.storageClass,
           isPrefix: false
         )
-      }
+    }
     return ObjectPage(objects: prefixes + objects, continuationToken: page.nextContinuationToken)
   }
 
+  func searchObjects(
+    at location: ObjectLocation,
+    query: String,
+    continuationToken: String?
+  ) async throws -> ObjectSearchPage {
+    guard !query.isEmpty else {
+      throw S3ServiceError.invalidConfiguration("Enter a search query.")
+    }
+    let page = try await s3Service(at: location).listObjects(
+      bucket: location.bucket,
+      prefix: location.prefix,
+      delimiter: nil,
+      continuationToken: continuationToken,
+      pageSize: 1_000
+    )
+    return ObjectSearchPage(
+      objects: page.objects.compactMap {
+        Self.recursiveSearchRow($0, below: location.prefix, matching: query)
+      },
+      scannedObjectCount: page.objects.count,
+      continuationToken: page.nextContinuationToken
+    )
+  }
+
+  nonisolated static func recursiveSearchRow(
+    _ object: S3Object,
+    below prefix: String,
+    matching query: String
+  ) -> ObjectRow? {
+    guard !bytesEqual(object.key, prefix), bytesStart(object.key, with: prefix) else {
+      return nil
+    }
+    let relativeBytes = object.key.utf8.dropFirst(prefix.utf8.count)
+    let relativeKey = String(decoding: relativeBytes, as: UTF8.self)
+    guard relativeKey.range(of: query, options: .caseInsensitive) != nil else { return nil }
+
+    var nameEnd = relativeBytes.endIndex
+    while nameEnd != relativeBytes.startIndex {
+      let last = relativeBytes.index(before: nameEnd)
+      guard relativeBytes[last] == 0x2F else { break }
+      nameEnd = last
+    }
+    let nameBytes = relativeBytes[..<nameEnd]
+    let separator = nameBytes.lastIndex(of: 0x2F)
+    let displayName = separator.map {
+      String(decoding: nameBytes[nameBytes.index(after: $0)...], as: UTF8.self)
+    } ?? String(decoding: nameBytes, as: UTF8.self)
+    let relativePath = separator.map {
+      String(decoding: nameBytes[...$0], as: UTF8.self)
+    } ?? ""
+    return ObjectRow(
+      id: ObjectRow.id(for: object.key, isPrefix: false),
+      key: object.key,
+      displayName: displayName.isEmpty ? relativeKey : displayName,
+      relativePath: relativePath,
+      size: object.size,
+      modifiedAt: object.lastModified,
+      storageClass: object.storageClass,
+      isPrefix: false
+    )
+  }
+
+  nonisolated static func validate(
+    _ location: ObjectLocation,
+    within accessRoot: S3AccessRoot?
+  ) throws {
+    guard let accessRoot else { return }
+    guard bytesEqual(location.bucket, accessRoot.bucket),
+      bytesStart(location.prefix, with: accessRoot.prefix)
+    else {
+      throw S3ServiceError.accessDenied
+    }
+  }
+
+  nonisolated static func validate(
+    key: String,
+    bucket: String,
+    within accessRoot: S3AccessRoot?
+  ) throws {
+    guard let accessRoot else { return }
+    guard bytesEqual(bucket, accessRoot.bucket), bytesStart(key, with: accessRoot.prefix) else {
+      throw S3ServiceError.accessDenied
+    }
+  }
+
+  nonisolated static func bytesEqual(_ value: String, _ expected: String) -> Bool {
+    value.utf8.elementsEqual(expected.utf8)
+  }
+
+  nonisolated static func bytesStart(_ value: String, with prefix: String) -> Bool {
+    value.utf8.starts(with: prefix.utf8)
+  }
+
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {
-    let metadata = try await s3Service(connectionID: location.connectionID).metadata(
+    let context = try await s3ServiceContext(at: location)
+    try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+    let metadata = try await context.service.metadata(
       bucket: location.bucket,
       key: object.key
     )
@@ -224,6 +351,7 @@ actor CoreWorkbenchService: WorkbenchServing {
   func upload(
     files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy
   ) async throws {
+    _ = try await s3ServiceContext(at: location)
     var transferIDs: [UUID] = []
     for source in files {
       try Task.checkCancellation()
@@ -239,6 +367,10 @@ actor CoreWorkbenchService: WorkbenchServing {
     collisionPolicy: CollisionPolicy
   ) async throws
   {
+    let context = try await s3ServiceContext(at: location)
+    for object in objects where !object.isPrefix {
+      try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+    }
     var transferIDs: [UUID] = []
     for object in objects where !object.isPrefix {
       try Task.checkCancellation()
@@ -251,10 +383,13 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws {
-    let service = try await s3Service(connectionID: location.connectionID)
+    let context = try await s3ServiceContext(at: location)
+    for object in objects where !object.isPrefix {
+      try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+    }
     for object in objects where !object.isPrefix {
       try Task.checkCancellation()
-      try await service.deleteObject(bucket: location.bucket, key: object.key)
+      try await context.service.deleteObject(bucket: location.bucket, key: object.key)
     }
   }
 
@@ -262,11 +397,13 @@ actor CoreWorkbenchService: WorkbenchServing {
     object: ObjectRow, from location: ObjectLocation, toKey: String,
     collisionPolicy: CollisionPolicy
   ) async throws {
-    let service = try await s3Service(connectionID: location.connectionID)
+    let context = try await s3ServiceContext(at: location)
+    try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+    try Self.validate(key: toKey, bucket: location.bucket, within: context.accessRoot)
     let destinationKey = try await remoteDestinationKey(
-      service: service, bucket: location.bucket, proposedKey: toKey,
+      service: context.service, bucket: location.bucket, proposedKey: toKey,
       collisionPolicy: collisionPolicy)
-    try await service.renameObject(
+    try await context.service.renameObject(
       bucket: location.bucket,
       sourceKey: object.key,
       destinationKey: destinationKey
@@ -282,7 +419,9 @@ actor CoreWorkbenchService: WorkbenchServing {
     let seconds =
       TimeInterval(components.seconds)
       + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
-    return try await s3Service(connectionID: location.connectionID).presignedRequest(
+    let context = try await s3ServiceContext(at: location)
+    try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+    return try await context.service.presignedRequest(
       bucket: location.bucket,
       key: object.key,
       expiresIn: seconds
@@ -295,7 +434,9 @@ actor CoreWorkbenchService: WorkbenchServing {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let destination = directory.appendingPathComponent(
       "\(UUID().uuidString)-\(safeFilename(object.displayName))")
-    try await s3Service(connectionID: location.connectionID).downloadFile(
+    let context = try await s3ServiceContext(at: location)
+    try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+    try await context.service.downloadFile(
       bucket: location.bucket,
       key: object.key,
       to: destination
@@ -333,7 +474,7 @@ actor CoreWorkbenchService: WorkbenchServing {
     let service: any S3Service
     switch operation {
     case .upload(let source, let location, let collisionPolicy):
-      service = try await s3Service(connectionID: location.connectionID)
+      service = try await s3Service(at: location)
       let hasScope = source.startAccessingSecurityScopedResource()
       defer { if hasScope { source.stopAccessingSecurityScopedResource() } }
       let contentType = UTType(filenameExtension: source.pathExtension)?.preferredMIMEType
@@ -352,7 +493,9 @@ actor CoreWorkbenchService: WorkbenchServing {
         progress(update.fractionCompleted)
       }
     case .download(let object, let location, let directory, let collisionPolicy):
-      service = try await s3Service(connectionID: location.connectionID)
+      let context = try await s3ServiceContext(at: location)
+      try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+      service = context.service
       let hasScope = directory.startAccessingSecurityScopedResource()
       defer { if hasScope { directory.stopAccessingSecurityScopedResource() } }
       let destination = try localDestinationURL(
@@ -371,15 +514,73 @@ actor CoreWorkbenchService: WorkbenchServing {
     }
   }
 
-  private func s3Service(connectionID: UUID) async throws -> any S3Service {
-    guard let profile = try await connectionStore.load().first(where: { $0.id == connectionID })
-    else {
-      throw S3ServiceError.notFound
+  private func s3Service(at location: ObjectLocation) async throws -> any S3Service {
+    try await s3ServiceContext(at: location).service
+  }
+
+  private func s3ServiceContext(at location: ObjectLocation) async throws -> S3ServiceContext {
+    let context = try await s3ServiceContext(connectionID: location.connectionID)
+    try Self.validate(location, within: context.accessRoot)
+    return context
+  }
+
+  private func s3ServiceContext(connectionID: UUID) async throws -> S3ServiceContext {
+    if let context = s3ServiceContexts[connectionID] { return context }
+    let generation = s3ServiceContextGenerations[connectionID, default: 0]
+    let load: S3ServiceContextLoad
+    if let current = s3ServiceContextLoads[connectionID], current.generation == generation {
+      load = current
+    } else {
+      let connectionProfilesLoader = connectionProfilesLoader
+      let credentialStore = credentialStore
+      let s3ServiceFactory = s3ServiceFactory
+      let task = Task<S3ServiceContext, Error> {
+        guard let profile = try await connectionProfilesLoader().first(where: {
+          $0.id == connectionID
+        }) else {
+          throw S3ServiceError.notFound
+        }
+        try Task.checkCancellation()
+        guard let credentials = try credentialStore.credentials(for: connectionID) else {
+          throw S3ServiceError.invalidConfiguration(
+            "No credentials are stored for this connection.")
+        }
+        try Task.checkCancellation()
+        return try await S3ServiceContext(
+          service: s3ServiceFactory(profile, credentials),
+          accessRoot: profile.resolvedAccessPath()
+        )
+      }
+      load = S3ServiceContextLoad(id: UUID(), generation: generation, task: task)
+      s3ServiceContextLoads[connectionID] = load
     }
-    guard let credentials = try credentialStore.credentials(for: connectionID) else {
-      throw S3ServiceError.invalidConfiguration("No credentials are stored for this connection.")
+
+    do {
+      let context = try await load.task.value
+      guard s3ServiceContextGenerations[connectionID, default: 0] == load.generation else {
+        return try await s3ServiceContext(connectionID: connectionID)
+      }
+      s3ServiceContexts[connectionID] = context
+      if s3ServiceContextLoads[connectionID]?.id == load.id {
+        s3ServiceContextLoads[connectionID] = nil
+      }
+      return context
+    } catch {
+      if s3ServiceContextGenerations[connectionID, default: 0] != load.generation {
+        return try await s3ServiceContext(connectionID: connectionID)
+      }
+      if s3ServiceContextLoads[connectionID]?.id == load.id {
+        s3ServiceContextLoads[connectionID] = nil
+      }
+      throw error
     }
-    return try AWSS3Service(profile: profile, credentials: credentials)
+  }
+
+  private func invalidateS3ServiceContext(for connectionID: UUID) {
+    s3ServiceContexts[connectionID] = nil
+    s3ServiceContextLoads[connectionID]?.task.cancel()
+    s3ServiceContextLoads[connectionID] = nil
+    s3ServiceContextGenerations[connectionID, default: 0] &+= 1
   }
 
   private func requireRemoteDestinationAvailable(
@@ -488,7 +689,9 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   private func relativeName(_ key: String, prefix: String) -> String {
-    String(key.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    guard Self.bytesStart(key, with: prefix) else { return key }
+    return String(decoding: key.utf8.dropFirst(prefix.utf8.count), as: UTF8.self)
+      .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
   }
 
   private func safeFilename(_ name: String) -> String {

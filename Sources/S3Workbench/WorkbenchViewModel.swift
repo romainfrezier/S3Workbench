@@ -14,16 +14,26 @@ final class WorkbenchViewModel {
   var selectedObjectIDs = Set<ObjectRow.ID>()
   var objectDetails: ObjectDetails?
   var searchQuery = ""
+  private(set) var activeSearchQuery: String?
+  private(set) var searchScannedObjectCount = 0
+  private(set) var searchErrorMessage: String?
+  private(set) var searchErrorSecondaryMessage: String?
+  private(set) var searchWasCancelled = false
   var continuationToken: String?
   var transfers: [TransferRow] = []
   var isLoadingConnections = false
   var isLoadingBuckets = false
   var isLoadingObjects = false
   var isLoadingMore = false
+  var isSearching = false
   var isDropTargeted = false
   var errorMessage: String?
   var bucketErrorMessage: String?
+  private(set) var bucketErrorSecondaryMessage: String?
   var objectErrorMessage: String?
+  private(set) var objectErrorSecondaryMessage: String?
+  private(set) var paginationErrorMessage: String?
+  private(set) var paginationErrorSecondaryMessage: String?
   var previewURL: URL? {
     didSet {
       guard oldValue != previewURL, let oldValue, isManagedPreview(oldValue) else { return }
@@ -34,9 +44,20 @@ final class WorkbenchViewModel {
   var historyIndex = 0
 
   private let service: any WorkbenchServing
-  private var appliedSearchQuery = ""
   private var loadedBucketConnectionID: UUID?
+  private var bucketLoadGeneration = UUID()
   private var loadedObjectContext: ObjectLoadContext?
+  private var objectLoadGeneration = UUID()
+  private var activeSearchContext: ObjectSearchContext?
+  private var searchTask: Task<Void, Never>?
+  private var nextSearchContinuationToken: String?
+  private var seenSearchContinuationTokens = Set<String>()
+  private var replacesSearchResultsOnNextPage = false
+  private var pendingSearchObjects: [ObjectRow] = []
+  private var pendingSearchScannedObjectCount = 0
+  private var visibleLoadingIndicators = Set<LoadingIndicator>()
+  @ObservationIgnored private var loadingIndicatorTasks: [LoadingIndicator: Task<Void, Never>] = [:]
+  @ObservationIgnored private var loadingIndicatorIDs: [LoadingIndicator: UUID] = [:]
 
   init(service: any WorkbenchServing) {
     self.service = service
@@ -48,6 +69,17 @@ final class WorkbenchViewModel {
 
   var accessRoot: S3AccessRoot? { selectedConnection?.initialLocation }
   var accessRootPrefix: String { accessRoot?.prefix ?? "" }
+  var isSearchMode: Bool { activeSearchQuery != nil }
+  var searchMatchCount: Int { isSearchMode ? objects.count : 0 }
+  var isConnectionLoadingIndicatorVisible: Bool {
+    visibleLoadingIndicators.contains(.connections)
+  }
+  var isBucketLoadingIndicatorVisible: Bool { visibleLoadingIndicators.contains(.buckets) }
+  var isObjectLoadingIndicatorVisible: Bool { visibleLoadingIndicators.contains(.objects) }
+  var isPaginationLoadingIndicatorVisible: Bool {
+    visibleLoadingIndicators.contains(.pagination)
+  }
+  var isSearchLoadingIndicatorVisible: Bool { visibleLoadingIndicators.contains(.search) }
 
   var selectedObjects: [ObjectRow] {
     objects.filter { selectedObjectIDs.contains($0.id) }
@@ -70,7 +102,10 @@ final class WorkbenchViewModel {
 
   func start() async {
     isLoadingConnections = true
-    defer { isLoadingConnections = false }
+    let loadingID = startLoadingIndicator(.connections)
+    defer {
+      if stopLoadingIndicator(.connections, id: loadingID) { isLoadingConnections = false }
+    }
     do {
       connections = try await service.loadConnections()
       selectedConnectionID = selectedConnectionID ?? connections.first?.id
@@ -81,15 +116,20 @@ final class WorkbenchViewModel {
   }
 
   func reloadConnection() async {
+    let generation = UUID()
+    bucketLoadGeneration = generation
+    invalidateLoadingIndicator(.buckets)
+    isLoadingBuckets = false
+    resetSearch(clearQuery: true)
     selectedBucket = nil
     prefix = ""
     objects = []
     selectedObjectIDs = []
     objectDetails = nil
-    searchQuery = ""
     history = [""]
     historyIndex = 0
     bucketErrorMessage = nil
+    bucketErrorSecondaryMessage = nil
     guard let selectedConnectionID else {
       buckets = []
       return
@@ -104,15 +144,23 @@ final class WorkbenchViewModel {
     }
     if loadedBucketConnectionID != selectedConnectionID { buckets = [] }
     isLoadingBuckets = true
-    defer { isLoadingBuckets = false }
+    let loadingID = startLoadingIndicator(.buckets)
+    defer {
+      if stopLoadingIndicator(.buckets, id: loadingID) { isLoadingBuckets = false }
+    }
     do {
       let loadedBuckets = try await service.listBuckets(connectionID: selectedConnectionID)
-      guard self.selectedConnectionID == selectedConnectionID else { return }
+      guard bucketLoadGeneration == generation,
+        self.selectedConnectionID == selectedConnectionID
+      else { return }
       buckets = loadedBuckets
       loadedBucketConnectionID = selectedConnectionID
     } catch {
-      guard self.selectedConnectionID == selectedConnectionID else { return }
+      guard bucketLoadGeneration == generation,
+        self.selectedConnectionID == selectedConnectionID
+      else { return }
       bucketErrorMessage = error.localizedDescription
+      bucketErrorSecondaryMessage = serviceFailureCopy(for: error)
     }
   }
 
@@ -139,6 +187,7 @@ final class WorkbenchViewModel {
       await reloadObjects()
       return
     }
+    resetSearch(clearQuery: true)
     selectedBucket = nil
     prefix = ""
     objects = []
@@ -152,7 +201,7 @@ final class WorkbenchViewModel {
 
   func navigate(to newPrefix: String) {
     prefix = newPrefix
-    if history[historyIndex] == newPrefix { return }
+    if history[historyIndex].utf8.elementsEqual(newPrefix.utf8) { return }
     history.removeSubrange((historyIndex + 1)..<history.count)
     history.append(newPrefix)
     historyIndex = history.count - 1
@@ -176,46 +225,186 @@ final class WorkbenchViewModel {
     await reloadObjects()
   }
 
-  func reloadObjects() async {
-    guard let location else { return }
-    let context = ObjectLoadContext(location: location, query: searchQuery)
-    if loadedObjectContext != context { objects = [] }
-    appliedSearchQuery = searchQuery
+  @discardableResult
+  func reloadObjects(clearSearchQuery: Bool = true) async -> UUID? {
+    let wasSearchMode = isSearchMode
+    resetSearch(clearQuery: clearSearchQuery)
+    let generation = UUID()
+    objectLoadGeneration = generation
+    invalidateLoadingIndicator(.pagination)
+    isLoadingMore = false
+    guard let location else { return nil }
+    let context = ObjectLoadContext(location: location)
+    let previousContinuationToken = loadedObjectContext == context ? continuationToken : nil
+    if wasSearchMode || loadedObjectContext != context { objects = [] }
     selectedObjectIDs = []
     objectDetails = nil
     continuationToken = nil
     objectErrorMessage = nil
+    objectErrorSecondaryMessage = nil
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
     isLoadingObjects = true
-    defer { isLoadingObjects = false }
+    let loadingID = startLoadingIndicator(.objects)
+    defer {
+      if stopLoadingIndicator(.objects, id: loadingID) { isLoadingObjects = false }
+    }
     do {
-      let page = try await service.listObjects(
-        at: location, query: searchQuery, continuationToken: nil)
-      guard self.location == location, self.searchQuery == context.query else { return }
+      let page = try await service.listObjects(at: location, continuationToken: nil)
+      guard objectLoadGeneration == generation, self.location == location, !isSearchMode else {
+        return generation
+      }
       objects = page.objects
       continuationToken = page.continuationToken
       loadedObjectContext = context
     } catch {
-      guard self.location == location, self.searchQuery == context.query else { return }
+      guard objectLoadGeneration == generation, self.location == location, !isSearchMode else {
+        return generation
+      }
+      continuationToken = previousContinuationToken
       objectErrorMessage = error.localizedDescription
+      objectErrorSecondaryMessage = serviceFailureCopy(for: error)
+    }
+    return generation
+  }
+
+  func startSearch() async {
+    let query = searchQuery
+    guard !query.isEmpty, let location else {
+      if isSearchMode { await reloadObjects(clearSearchQuery: false) }
+      return
+    }
+
+    let refreshesCurrentSearch = activeSearchContext?.location == location
+      && activeSearchQuery?.utf8.elementsEqual(query.utf8) == true
+    let previousScannedObjectCount = searchScannedObjectCount
+    resetSearch(clearQuery: false)
+    let context = ObjectSearchContext(id: UUID(), location: location, query: query)
+    activeSearchContext = context
+    activeSearchQuery = query
+    if !refreshesCurrentSearch { objects = [] }
+    selectedObjectIDs = []
+    objectDetails = nil
+    continuationToken = nil
+    objectErrorMessage = nil
+    objectErrorSecondaryMessage = nil
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
+    searchScannedObjectCount = refreshesCurrentSearch ? previousScannedObjectCount : 0
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    replacesSearchResultsOnNextPage = refreshesCurrentSearch
+    pendingSearchObjects = []
+    pendingSearchScannedObjectCount = 0
+    isSearching = true
+    startLoadingIndicator(.search, id: context.id)
+
+    let task = Task { [weak self] in
+      guard let self else { return }
+      await self.runSearch(context)
+    }
+    searchTask = task
+    await task.value
+  }
+
+  func searchQueryDidChange() async {
+    guard let activeSearchQuery,
+      !activeSearchQuery.utf8.elementsEqual(searchQuery.utf8)
+    else { return }
+    await reloadObjects(clearSearchQuery: false)
+  }
+
+  func cancelSearch() {
+    guard isSearching else { return }
+    searchTask?.cancel()
+    isSearching = false
+    searchWasCancelled = true
+    if let context = activeSearchContext {
+      stopLoadingIndicator(.search, id: context.id)
     }
   }
 
-  func reloadSearchIfNeeded() async {
-    guard location != nil, appliedSearchQuery != searchQuery else { return }
-    await reloadObjects()
+  func retrySearch() async {
+    guard let context = activeSearchContext, !isSearching,
+      location == context.location, searchQuery.utf8.elementsEqual(context.query.utf8),
+      searchErrorMessage != nil || searchWasCancelled
+    else { return }
+    let retryContext = ObjectSearchContext(
+      id: UUID(), location: context.location, query: context.query)
+    activeSearchContext = retryContext
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    isSearching = true
+    startLoadingIndicator(.search, id: retryContext.id)
+    let task = Task { [weak self] in
+      guard let self else { return }
+      await self.runSearch(retryContext)
+    }
+    searchTask = task
+    await task.value
   }
 
-  func loadMore() async {
-    guard let location, let continuationToken, !isLoadingMore else { return }
+  func revealSelectedInPrefix() async {
+    guard isSearchMode, let object = selectedObject else { return }
+    let candidateIDs = object.key.hasSuffix("/")
+      ? [object.id, ObjectRow.id(for: object.key, isPrefix: true)] : [object.id]
+    let destination = parentPrefix(of: object.key)
+    navigate(to: destination)
+    guard let expectedLocation = location,
+      let generation = await reloadObjects(),
+      objectLoadGeneration == generation,
+      location == expectedLocation
+    else { return }
+    var seenTokens = Set<String>()
+    while !objects.contains(where: { candidateIDs.contains($0.id) }),
+      let token = continuationToken
+    {
+      guard seenTokens.insert(token).inserted else {
+        let error = S3ServiceError.service(
+          "The server returned a repeated object pagination token.")
+        paginationErrorMessage = error.localizedDescription
+        paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
+        break
+      }
+      guard await loadMore(), objectLoadGeneration == generation,
+        location == expectedLocation
+      else { return }
+    }
+    if let revealed = objects.first(where: { candidateIDs.contains($0.id) }) {
+      selectedObjectIDs = [revealed.id]
+    }
+  }
+
+  @discardableResult
+  func loadMore() async -> Bool {
+    guard !isSearchMode, let location, let continuationToken, !isLoadingMore else {
+      return false
+    }
+    let generation = objectLoadGeneration
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
     isLoadingMore = true
-    defer { isLoadingMore = false }
+    let loadingID = startLoadingIndicator(.pagination)
+    defer {
+      if stopLoadingIndicator(.pagination, id: loadingID) { isLoadingMore = false }
+    }
     do {
-      let page = try await service.listObjects(
-        at: location, query: searchQuery, continuationToken: continuationToken)
+      let page = try await service.listObjects(at: location, continuationToken: continuationToken)
+      guard objectLoadGeneration == generation, self.location == location, !isSearchMode else {
+        return false
+      }
       objects.append(contentsOf: page.objects)
       self.continuationToken = page.continuationToken
+      return true
     } catch {
-      errorMessage = error.localizedDescription
+      guard objectLoadGeneration == generation, self.location == location, !isSearchMode else {
+        return false
+      }
+      paginationErrorMessage = error.localizedDescription
+      paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
+      return false
     }
   }
 
@@ -357,9 +546,196 @@ final class WorkbenchViewModel {
   private func isManagedPreview(_ url: URL) -> Bool {
     url.path.contains("/S3Workbench-Previews/")
   }
+
+  private func runSearch(_ context: ObjectSearchContext) async {
+    do {
+      repeat {
+        try Task.checkCancellation()
+        let page = try await service.searchObjects(
+          at: context.location,
+          query: context.query,
+          continuationToken: nextSearchContinuationToken
+        )
+        try Task.checkCancellation()
+        guard isActive(context), isSearching else {
+          discardStaleSearch(context)
+          return
+        }
+        if let nextToken = page.continuationToken,
+          !seenSearchContinuationTokens.insert(nextToken).inserted
+        {
+          throw S3ServiceError.service(
+            "The server returned a repeated object pagination token.")
+        }
+        if replacesSearchResultsOnNextPage {
+          pendingSearchObjects.append(contentsOf: page.objects)
+          pendingSearchScannedObjectCount += page.scannedObjectCount
+        } else {
+          objects.append(contentsOf: page.objects)
+          searchScannedObjectCount += page.scannedObjectCount
+        }
+        nextSearchContinuationToken = page.continuationToken
+      } while nextSearchContinuationToken != nil
+
+      guard isActive(context) else {
+        discardStaleSearch(context)
+        return
+      }
+      if replacesSearchResultsOnNextPage {
+        objects = pendingSearchObjects
+        searchScannedObjectCount = pendingSearchScannedObjectCount
+        replacesSearchResultsOnNextPage = false
+        pendingSearchObjects = []
+        pendingSearchScannedObjectCount = 0
+      }
+      isSearching = false
+      searchTask = nil
+      stopLoadingIndicator(.search, id: context.id)
+    } catch {
+      guard isActive(context) else {
+        discardStaleSearch(context)
+        return
+      }
+      isSearching = false
+      searchTask = nil
+      stopLoadingIndicator(.search, id: context.id)
+      if error is CancellationError || error as? S3ServiceError == .cancelled {
+        searchWasCancelled = true
+      } else {
+        searchErrorMessage = error.localizedDescription
+        searchErrorSecondaryMessage = serviceFailureCopy(for: error)
+      }
+    }
+  }
+
+  private func isActive(_ context: ObjectSearchContext) -> Bool {
+    activeSearchContext == context && location == context.location
+      && searchQuery.utf8.elementsEqual(context.query.utf8)
+  }
+
+  private func discardStaleSearch(_ context: ObjectSearchContext) {
+    guard activeSearchContext == context else { return }
+    stopLoadingIndicator(.search, id: context.id)
+    searchTask = nil
+    activeSearchContext = nil
+    activeSearchQuery = nil
+    isSearching = false
+    objects = []
+    selectedObjectIDs = []
+    objectDetails = nil
+    searchScannedObjectCount = 0
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    nextSearchContinuationToken = nil
+    seenSearchContinuationTokens = []
+    replacesSearchResultsOnNextPage = false
+    pendingSearchObjects = []
+    pendingSearchScannedObjectCount = 0
+  }
+
+  private func resetSearch(clearQuery: Bool) {
+    if let context = activeSearchContext {
+      stopLoadingIndicator(.search, id: context.id)
+    }
+    searchTask?.cancel()
+    searchTask = nil
+    activeSearchContext = nil
+    activeSearchQuery = nil
+    isSearching = false
+    searchScannedObjectCount = 0
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    nextSearchContinuationToken = nil
+    seenSearchContinuationTokens = []
+    replacesSearchResultsOnNextPage = false
+    pendingSearchObjects = []
+    pendingSearchScannedObjectCount = 0
+    if clearQuery { searchQuery = "" }
+  }
+
+  private func parentPrefix(of key: String) -> String {
+    let bytes = key.utf8
+    var end = bytes.endIndex
+    if end != bytes.startIndex {
+      let last = bytes.index(before: end)
+      if bytes[last] == 0x2F { end = last }
+    }
+    guard let separator = bytes[..<end].lastIndex(of: 0x2F) else {
+      return accessRootPrefix
+    }
+    let candidate = String(decoding: bytes[...separator], as: UTF8.self)
+    return candidate.utf8.starts(with: accessRootPrefix.utf8) ? candidate : accessRootPrefix
+  }
+
+  private func serviceFailureCopy(for error: Error) -> String {
+    switch error as? S3ServiceError {
+    case .networkUnavailable:
+      "The network took an unscheduled coffee break."
+    case .accessDenied:
+      "S3 said nope. Check the credentials and permissions."
+    default:
+      "The cloud returned a plot twist."
+    }
+  }
+
+  @discardableResult
+  private func startLoadingIndicator(
+    _ indicator: LoadingIndicator, id: UUID = UUID()
+  ) -> UUID {
+    loadingIndicatorTasks[indicator]?.cancel()
+    loadingIndicatorIDs[indicator] = id
+    guard !visibleLoadingIndicators.contains(indicator) else { return id }
+    loadingIndicatorTasks[indicator] = Task { [weak self] in
+      do {
+        try await Task.sleep(for: .milliseconds(200))
+      } catch {
+        return
+      }
+      guard let self, loadingIndicatorIDs[indicator] == id else { return }
+      visibleLoadingIndicators.insert(indicator)
+    }
+    return id
+  }
+
+  @discardableResult
+  private func stopLoadingIndicator(_ indicator: LoadingIndicator, id: UUID) -> Bool {
+    guard loadingIndicatorIDs[indicator] == id else { return false }
+    loadingIndicatorTasks[indicator]?.cancel()
+    loadingIndicatorTasks[indicator] = nil
+    loadingIndicatorIDs[indicator] = nil
+    visibleLoadingIndicators.remove(indicator)
+    return true
+  }
+
+  private func invalidateLoadingIndicator(_ indicator: LoadingIndicator) {
+    loadingIndicatorTasks[indicator]?.cancel()
+    loadingIndicatorTasks[indicator] = nil
+    loadingIndicatorIDs[indicator] = nil
+    visibleLoadingIndicators.remove(indicator)
+  }
+}
+
+private enum LoadingIndicator: Hashable, Sendable {
+  case connections
+  case buckets
+  case objects
+  case pagination
+  case search
 }
 
 private struct ObjectLoadContext: Equatable {
   let location: ObjectLocation
+}
+
+private struct ObjectSearchContext: Equatable {
+  let id: UUID
+  let location: ObjectLocation
   let query: String
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.id == rhs.id && lhs.location == rhs.location
+      && lhs.query.utf8.elementsEqual(rhs.query.utf8)
+  }
 }
