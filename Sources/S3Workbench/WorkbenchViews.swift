@@ -32,7 +32,11 @@ struct WorkbenchRootView: View {
     }
     .navigationSplitViewStyle(.balanced)
     .toolbar { toolbarContent }
-    .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Filter by key prefix")
+    .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Search below this prefix")
+    .onSubmit(of: .search) { Task { await model.startSearch() } }
+    .onChange(of: model.searchQuery) { _, _ in
+      Task { await model.searchQueryDidChange() }
+    }
     .sheet(item: $connectionDraft) { draft in
       ConnectionEditorView(
         draft: draft,
@@ -128,11 +132,6 @@ struct WorkbenchRootView: View {
       await model.reloadConnection()
     }
     .task(id: model.selectedObjectIDs) { await model.loadSelectionDetails() }
-    .task(id: model.searchQuery) {
-      try? await Task.sleep(for: .milliseconds(300))
-      guard !Task.isCancelled, model.location != nil else { return }
-      await model.reloadSearchIfNeeded()
-    }
   }
 
   private var connectionSidebar: some View {
@@ -244,6 +243,8 @@ struct WorkbenchRootView: View {
         Task {
           if model.selectedBucket == nil {
             await model.reloadConnection()
+          } else if model.isSearchMode {
+            await model.startSearch()
           } else {
             await model.reloadObjects()
           }
@@ -275,6 +276,10 @@ struct WorkbenchRootView: View {
         Button("Quick Look") { Task { await model.previewSelected() } }
           .keyboardShortcut(.space, modifiers: [])
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
+        if model.isSearchMode {
+          Button("Reveal in Prefix") { Task { await model.revealSelectedInPrefix() } }
+            .disabled(model.selectedObject == nil)
+        }
         Button("Download…") { isDownloadDestinationPresented = true }
           .disabled(
             model.selectedObjects.isEmpty || model.selectedObjects.contains(where: \.isPrefix))
@@ -409,6 +414,13 @@ private struct ObjectBrowserView: View {
         )
       }
       .width(min: 220, ideal: 420)
+      if model.isSearchMode {
+        TableColumn("Path") { object in
+          Text(object.relativePath.isEmpty ? "—" : object.relativePath)
+            .foregroundStyle(object.relativePath.isEmpty ? .tertiary : .secondary)
+        }
+        .width(min: 140, ideal: 240)
+      }
       TableColumn("Size", sortUsing: ObjectSortComparator(column: .size)) { object in
         Text(
           object.isPrefix
@@ -441,6 +453,12 @@ private struct ObjectBrowserView: View {
             Task { await model.openPrefix(object) }
           } else {
             Task { await model.previewSelected() }
+          }
+        }
+        if model.isSearchMode {
+          Button("Reveal in Prefix") {
+            model.select(object)
+            Task { await model.revealSelectedInPrefix() }
           }
         }
         if !object.isPrefix {
@@ -478,7 +496,38 @@ private struct ObjectBrowserView: View {
       }
     }
     .overlay {
-      if model.isLoadingObjects, model.objects.isEmpty {
+      if model.isSearching, model.objects.isEmpty {
+        ContentUnavailableView {
+          VStack(spacing: 12) {
+            ProgressView()
+            Text("Searching Objects").font(.headline)
+          }
+        } description: {
+          Text("Walking the prefix tree. S3 made us do it.")
+        } actions: {
+          Button("Cancel") { model.cancelSearch() }
+        }
+      } else if let error = model.searchErrorMessage, model.objects.isEmpty {
+        ContentUnavailableView {
+          Label("Can’t Search Objects", systemImage: "exclamationmark.triangle")
+        } description: {
+          VStack(spacing: 4) {
+            Text(error)
+            Text(model.searchErrorSecondaryMessage ?? "The cloud returned a plot twist.")
+              .foregroundStyle(.secondary)
+          }
+        } actions: {
+          Button("Retry") { Task { await model.retrySearch() } }
+        }
+      } else if model.searchWasCancelled, model.objects.isEmpty {
+        ContentUnavailableView {
+          Label("Search Cancelled", systemImage: "xmark.circle")
+        } description: {
+          Text("Search cancelled. The objects remain mysterious.")
+        } actions: {
+          Button("Retry") { Task { await model.retrySearch() } }
+        }
+      } else if model.isLoadingObjects, model.objects.isEmpty {
         ProgressView("Loading objects…")
       } else if let error = model.objectErrorMessage, model.objects.isEmpty {
         ContentUnavailableView {
@@ -490,20 +539,28 @@ private struct ObjectBrowserView: View {
         }
       } else if model.objects.isEmpty {
         ContentUnavailableView {
-          Label(model.searchQuery.isEmpty ? "Empty Prefix" : "No Matches", systemImage: "tray")
+          Label(model.isSearchMode ? "No Matches" : "Empty Prefix", systemImage: "tray")
         } description: {
           Text(
-            model.searchQuery.isEmpty
-              ? "Drop files here or use Upload." : "Try a different object search.")
+            model.isSearchMode
+              ? "No matches. The needle may be in another bucket."
+              : "Nothing here. Impressively lightweight.")
         } actions: {
-          if model.searchQuery.isEmpty { Button("Upload Files") { requestUpload() } }
+          if !model.isSearchMode { Button("Upload Files") { requestUpload() } }
         }
       }
     }
     .safeAreaInset(edge: .top) {
-      if let error = model.objectErrorMessage, !model.objects.isEmpty {
+      if let error = model.searchErrorMessage, !model.objects.isEmpty {
+        RefreshErrorBanner(
+          message: error,
+          secondaryMessage: model.searchErrorSecondaryMessage
+        ) { Task { await model.retrySearch() } }
+      } else if !model.isSearchMode, let error = model.objectErrorMessage,
+        !model.objects.isEmpty
+      {
         RefreshErrorBanner(message: error) { Task { await model.reloadObjects() } }
-      } else if model.isLoadingObjects, !model.objects.isEmpty {
+      } else if !model.isSearchMode, model.isLoadingObjects, !model.objects.isEmpty {
         RefreshProgressBanner(title: "Refreshing objects…")
       }
     }
@@ -522,7 +579,9 @@ private struct ObjectBrowserView: View {
       model.isDropTargeted = $0
     }
     .safeAreaInset(edge: .bottom) {
-      if model.continuationToken != nil {
+      if model.isSearchMode, !model.objects.isEmpty {
+        SearchStatusBar(model: model)
+      } else if !model.isSearchMode, model.continuationToken != nil {
         Button(model.isLoadingMore ? "Loading…" : "Load More") { Task { await model.loadMore() } }
           .disabled(model.isLoadingMore)
           .padding(8)
@@ -544,6 +603,37 @@ private struct ObjectBrowserView: View {
 
 }
 
+private struct SearchStatusBar: View {
+  @Bindable var model: WorkbenchViewModel
+
+  var body: some View {
+    HStack(spacing: 8) {
+      if model.isSearching { ProgressView().controlSize(.small) }
+      VStack(alignment: .leading, spacing: 2) {
+        Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
+          .font(.callout)
+        if model.searchWasCancelled {
+          Text("Search cancelled. The objects remain mysterious.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+      Spacer()
+      if model.isSearching {
+        Button("Cancel") { model.cancelSearch() }
+      } else if model.searchWasCancelled {
+        Button("Retry") { Task { await model.retrySearch() } }
+      }
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
+    .background(.bar)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(
+      "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches")
+  }
+}
+
 private struct RefreshProgressBanner: View {
   let title: String
 
@@ -561,12 +651,19 @@ private struct RefreshProgressBanner: View {
 
 private struct RefreshErrorBanner: View {
   let message: String
+  var secondaryMessage: String? = nil
   let retry: () -> Void
 
   var body: some View {
     HStack(spacing: 8) {
       Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-      Text(message).font(.callout).lineLimit(2)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(message).font(.callout)
+        if let secondaryMessage {
+          Text(secondaryMessage).font(.caption).foregroundStyle(.secondary)
+        }
+      }
+      .lineLimit(2)
       Spacer()
       Button("Retry", action: retry)
     }

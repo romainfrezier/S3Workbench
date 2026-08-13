@@ -39,6 +39,17 @@ export AWS_EC2_METADATA_DISABLED=true
 "${compose[@]}" run --rm --entrypoint /bin/sh minio-init -c '
   set -eu
   mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" --api S3v4 --path on >/dev/null
+  fixture=/tmp/s3workbench-recursive-search
+  mkdir -p "$fixture/nested"
+  i=0
+  while [ "$i" -le 1004 ]; do
+    number=$(printf "%04d" "$i")
+    name="object-$number.txt"
+    if [ "$i" -eq 1004 ]; then name="object-$number-needle.txt"; fi
+    : >"$fixture/nested/$name"
+    i=$((i + 1))
+  done
+  mc mirror "$fixture" "local/$MINIO_TEST_BUCKET/recursive-search" >/dev/null
   key="prefix with spaces/ünicode-雪.txt"
   printf "S3Workbench integration payload" | mc pipe "local/$MINIO_TEST_BUCKET/$key" >/dev/null
   test "$(mc cat "local/$MINIO_TEST_BUCKET/$key")" = "S3Workbench integration payload"

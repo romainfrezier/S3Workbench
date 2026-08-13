@@ -167,14 +167,12 @@ actor CoreWorkbenchService: WorkbenchServing {
 
   func listObjects(
     at location: ObjectLocation,
-    query: String,
     continuationToken: String?
   ) async throws -> ObjectPage {
-    let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-    let effectivePrefix = location.prefix + query
     let page = try await s3Service(connectionID: location.connectionID).listObjects(
       bucket: location.bucket,
-      prefix: effectivePrefix,
+      prefix: location.prefix,
+      delimiter: "/",
       continuationToken: continuationToken,
       pageSize: 1_000
     )
@@ -183,6 +181,7 @@ actor CoreWorkbenchService: WorkbenchServing {
         id: "prefix:\($0)",
         key: $0,
         displayName: relativeName($0, prefix: location.prefix),
+        relativePath: "",
         size: 0,
         modifiedAt: nil,
         storageClass: nil,
@@ -196,13 +195,65 @@ actor CoreWorkbenchService: WorkbenchServing {
           id: "object:\($0.key)",
           key: $0.key,
           displayName: relativeName($0.key, prefix: location.prefix),
+          relativePath: "",
           size: $0.size,
           modifiedAt: $0.lastModified,
           storageClass: $0.storageClass,
           isPrefix: false
         )
-      }
+    }
     return ObjectPage(objects: prefixes + objects, continuationToken: page.nextContinuationToken)
+  }
+
+  func searchObjects(
+    at location: ObjectLocation,
+    query: String,
+    continuationToken: String?
+  ) async throws -> ObjectSearchPage {
+    guard !query.isEmpty else {
+      throw S3ServiceError.invalidConfiguration("Enter a search query.")
+    }
+    let page = try await s3Service(connectionID: location.connectionID).listObjects(
+      bucket: location.bucket,
+      prefix: location.prefix,
+      delimiter: nil,
+      continuationToken: continuationToken,
+      pageSize: 1_000
+    )
+    return ObjectSearchPage(
+      objects: page.objects.compactMap {
+        Self.recursiveSearchRow($0, below: location.prefix, matching: query)
+      },
+      scannedObjectCount: page.objects.count,
+      continuationToken: page.nextContinuationToken
+    )
+  }
+
+  nonisolated static func recursiveSearchRow(
+    _ object: S3Object,
+    below prefix: String,
+    matching query: String
+  ) -> ObjectRow? {
+    guard object.key != prefix, object.key.hasPrefix(prefix) else { return nil }
+    let relativeKey = String(object.key.dropFirst(prefix.count))
+    guard relativeKey.range(of: query, options: .caseInsensitive) != nil else { return nil }
+
+    var nameKey = relativeKey[...]
+    while nameKey.last == "/" { nameKey = nameKey.dropLast() }
+    let separator = nameKey.lastIndex(of: "/")
+    let displayName = separator.map { String(nameKey[nameKey.index(after: $0)...]) }
+      ?? String(nameKey)
+    let relativePath = separator.map { String(nameKey[...$0]) } ?? ""
+    return ObjectRow(
+      id: "object:\(object.key)",
+      key: object.key,
+      displayName: displayName.isEmpty ? relativeKey : displayName,
+      relativePath: relativePath,
+      size: object.size,
+      modifiedAt: object.lastModified,
+      storageClass: object.storageClass,
+      isPrefix: false
+    )
   }
 
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {

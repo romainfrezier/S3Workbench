@@ -14,12 +14,18 @@ final class WorkbenchViewModel {
   var selectedObjectIDs = Set<ObjectRow.ID>()
   var objectDetails: ObjectDetails?
   var searchQuery = ""
+  private(set) var activeSearchQuery: String?
+  private(set) var searchScannedObjectCount = 0
+  private(set) var searchErrorMessage: String?
+  private(set) var searchErrorSecondaryMessage: String?
+  private(set) var searchWasCancelled = false
   var continuationToken: String?
   var transfers: [TransferRow] = []
   var isLoadingConnections = false
   var isLoadingBuckets = false
   var isLoadingObjects = false
   var isLoadingMore = false
+  var isSearching = false
   var isDropTargeted = false
   var errorMessage: String?
   var bucketErrorMessage: String?
@@ -34,9 +40,12 @@ final class WorkbenchViewModel {
   var historyIndex = 0
 
   private let service: any WorkbenchServing
-  private var appliedSearchQuery = ""
   private var loadedBucketConnectionID: UUID?
   private var loadedObjectContext: ObjectLoadContext?
+  private var activeSearchContext: ObjectSearchContext?
+  private var searchTask: Task<Void, Never>?
+  private var nextSearchContinuationToken: String?
+  private var seenSearchContinuationTokens = Set<String>()
 
   init(service: any WorkbenchServing) {
     self.service = service
@@ -48,6 +57,8 @@ final class WorkbenchViewModel {
 
   var accessRoot: S3AccessRoot? { selectedConnection?.initialLocation }
   var accessRootPrefix: String { accessRoot?.prefix ?? "" }
+  var isSearchMode: Bool { activeSearchQuery != nil }
+  var searchMatchCount: Int { isSearchMode ? objects.count : 0 }
 
   var selectedObjects: [ObjectRow] {
     objects.filter { selectedObjectIDs.contains($0.id) }
@@ -81,12 +92,12 @@ final class WorkbenchViewModel {
   }
 
   func reloadConnection() async {
+    resetSearch(clearQuery: true)
     selectedBucket = nil
     prefix = ""
     objects = []
     selectedObjectIDs = []
     objectDetails = nil
-    searchQuery = ""
     history = [""]
     historyIndex = 0
     bucketErrorMessage = nil
@@ -139,6 +150,7 @@ final class WorkbenchViewModel {
       await reloadObjects()
       return
     }
+    resetSearch(clearQuery: true)
     selectedBucket = nil
     prefix = ""
     objects = []
@@ -176,11 +188,12 @@ final class WorkbenchViewModel {
     await reloadObjects()
   }
 
-  func reloadObjects() async {
+  func reloadObjects(clearSearchQuery: Bool = true) async {
+    let wasSearchMode = isSearchMode
+    resetSearch(clearQuery: clearSearchQuery)
     guard let location else { return }
-    let context = ObjectLoadContext(location: location, query: searchQuery)
-    if loadedObjectContext != context { objects = [] }
-    appliedSearchQuery = searchQuery
+    let context = ObjectLoadContext(location: location)
+    if wasSearchMode || loadedObjectContext != context { objects = [] }
     selectedObjectIDs = []
     objectDetails = nil
     continuationToken = nil
@@ -188,30 +201,106 @@ final class WorkbenchViewModel {
     isLoadingObjects = true
     defer { isLoadingObjects = false }
     do {
-      let page = try await service.listObjects(
-        at: location, query: searchQuery, continuationToken: nil)
-      guard self.location == location, self.searchQuery == context.query else { return }
+      let page = try await service.listObjects(at: location, continuationToken: nil)
+      guard self.location == location, !isSearchMode else { return }
       objects = page.objects
       continuationToken = page.continuationToken
       loadedObjectContext = context
     } catch {
-      guard self.location == location, self.searchQuery == context.query else { return }
+      guard self.location == location, !isSearchMode else { return }
       objectErrorMessage = error.localizedDescription
     }
   }
 
-  func reloadSearchIfNeeded() async {
-    guard location != nil, appliedSearchQuery != searchQuery else { return }
+  func startSearch() async {
+    let query = searchQuery
+    guard !query.isEmpty, let location else {
+      if isSearchMode { await reloadObjects(clearSearchQuery: false) }
+      return
+    }
+
+    resetSearch(clearQuery: false)
+    let context = ObjectSearchContext(id: UUID(), location: location, query: query)
+    activeSearchContext = context
+    activeSearchQuery = query
+    objects = []
+    selectedObjectIDs = []
+    objectDetails = nil
+    continuationToken = nil
+    objectErrorMessage = nil
+    searchScannedObjectCount = 0
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    isSearching = true
+
+    let task = Task { [weak self] in
+      guard let self else { return }
+      await self.runSearch(context)
+    }
+    searchTask = task
+    await task.value
+  }
+
+  func searchQueryDidChange() async {
+    guard let activeSearchQuery, activeSearchQuery != searchQuery else { return }
+    await reloadObjects(clearSearchQuery: false)
+  }
+
+  func cancelSearch() {
+    guard isSearching else { return }
+    searchTask?.cancel()
+    isSearching = false
+    searchWasCancelled = true
+  }
+
+  func retrySearch() async {
+    guard let context = activeSearchContext, !isSearching,
+      location == context.location, searchQuery == context.query,
+      searchErrorMessage != nil || searchWasCancelled
+    else { return }
+    let retryContext = ObjectSearchContext(
+      id: UUID(), location: context.location, query: context.query)
+    activeSearchContext = retryContext
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    isSearching = true
+    let task = Task { [weak self] in
+      guard let self else { return }
+      await self.runSearch(retryContext)
+    }
+    searchTask = task
+    await task.value
+  }
+
+  func revealSelectedInPrefix() async {
+    guard isSearchMode, let object = selectedObject else { return }
+    let objectID = object.id
+    let destination = parentPrefix(of: object.key)
+    resetSearch(clearQuery: true)
+    navigate(to: destination)
     await reloadObjects()
+    var previousToken: String?
+    while !objects.contains(where: { $0.id == objectID }),
+      let token = continuationToken,
+      token != previousToken
+    {
+      previousToken = token
+      await loadMore()
+    }
+    if objects.contains(where: { $0.id == objectID }) {
+      selectedObjectIDs = [objectID]
+    }
   }
 
   func loadMore() async {
-    guard let location, let continuationToken, !isLoadingMore else { return }
+    guard !isSearchMode, let location, let continuationToken, !isLoadingMore else { return }
     isLoadingMore = true
     defer { isLoadingMore = false }
     do {
-      let page = try await service.listObjects(
-        at: location, query: searchQuery, continuationToken: continuationToken)
+      let page = try await service.listObjects(at: location, continuationToken: continuationToken)
+      guard self.location == location, !isSearchMode else { return }
       objects.append(contentsOf: page.objects)
       self.continuationToken = page.continuationToken
     } catch {
@@ -357,9 +446,114 @@ final class WorkbenchViewModel {
   private func isManagedPreview(_ url: URL) -> Bool {
     url.path.contains("/S3Workbench-Previews/")
   }
+
+  private func runSearch(_ context: ObjectSearchContext) async {
+    do {
+      repeat {
+        try Task.checkCancellation()
+        let page = try await service.searchObjects(
+          at: context.location,
+          query: context.query,
+          continuationToken: nextSearchContinuationToken
+        )
+        try Task.checkCancellation()
+        guard isActive(context), isSearching else {
+          discardStaleSearch(context)
+          return
+        }
+        if let nextToken = page.continuationToken,
+          !seenSearchContinuationTokens.insert(nextToken).inserted
+        {
+          throw S3ServiceError.service(
+            "The server returned a repeated object pagination token.")
+        }
+        objects.append(contentsOf: page.objects)
+        searchScannedObjectCount += page.scannedObjectCount
+        nextSearchContinuationToken = page.continuationToken
+      } while nextSearchContinuationToken != nil
+
+      guard isActive(context) else {
+        discardStaleSearch(context)
+        return
+      }
+      isSearching = false
+      searchTask = nil
+    } catch {
+      guard isActive(context) else {
+        discardStaleSearch(context)
+        return
+      }
+      isSearching = false
+      searchTask = nil
+      if error is CancellationError || error as? S3ServiceError == .cancelled {
+        searchWasCancelled = true
+      } else {
+        searchErrorMessage = error.localizedDescription
+        searchErrorSecondaryMessage = searchFailureCopy(for: error)
+      }
+    }
+  }
+
+  private func isActive(_ context: ObjectSearchContext) -> Bool {
+    activeSearchContext == context && location == context.location && searchQuery == context.query
+  }
+
+  private func discardStaleSearch(_ context: ObjectSearchContext) {
+    guard activeSearchContext == context else { return }
+    searchTask = nil
+    activeSearchContext = nil
+    activeSearchQuery = nil
+    isSearching = false
+    objects = []
+    selectedObjectIDs = []
+    objectDetails = nil
+    searchScannedObjectCount = 0
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    nextSearchContinuationToken = nil
+    seenSearchContinuationTokens = []
+  }
+
+  private func resetSearch(clearQuery: Bool) {
+    searchTask?.cancel()
+    searchTask = nil
+    activeSearchContext = nil
+    activeSearchQuery = nil
+    isSearching = false
+    searchScannedObjectCount = 0
+    searchErrorMessage = nil
+    searchErrorSecondaryMessage = nil
+    searchWasCancelled = false
+    nextSearchContinuationToken = nil
+    seenSearchContinuationTokens = []
+    if clearQuery { searchQuery = "" }
+  }
+
+  private func parentPrefix(of key: String) -> String {
+    guard let separator = key.lastIndex(of: "/") else { return accessRootPrefix }
+    let candidate = String(key[...separator])
+    return candidate.hasPrefix(accessRootPrefix) ? candidate : accessRootPrefix
+  }
+
+  private func searchFailureCopy(for error: Error) -> String {
+    switch error as? S3ServiceError {
+    case .networkUnavailable:
+      "The network took an unscheduled coffee break."
+    case .accessDenied:
+      "S3 said nope. Check the credentials and permissions."
+    default:
+      "The cloud returned a plot twist."
+    }
+  }
 }
 
 private struct ObjectLoadContext: Equatable {
+  let location: ObjectLocation
+}
+
+private struct ObjectSearchContext: Equatable {
+  let id: UUID
   let location: ObjectLocation
   let query: String
 }

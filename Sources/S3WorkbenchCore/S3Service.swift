@@ -8,6 +8,7 @@ public protocol S3Service: Sendable {
     func listObjects(
         bucket: String,
         prefix: String,
+        delimiter: String?,
         continuationToken: String?,
         pageSize: Int
     ) async throws -> S3ObjectPage
@@ -42,12 +43,14 @@ public extension S3Service {
     func listObjects(
         bucket: String,
         prefix: String = "",
+        delimiter: String? = "/",
         continuationToken: String? = nil,
         pageSize: Int = 1_000
     ) async throws -> S3ObjectPage {
         try await listObjects(
             bucket: bucket,
             prefix: prefix,
+            delimiter: delimiter,
             continuationToken: continuationToken,
             pageSize: pageSize
         )

@@ -142,6 +142,38 @@ import Testing
         #expect(firstPage.keyCount == 1)
         #expect(secondPage.keyCount == 1)
 
+        var recursiveToken: String?
+        var recursivePageNumber = 0
+        var recursiveObjectCount = 0
+        var matchPage: Int?
+        repeat {
+            let page = try await service.listObjects(
+                bucket: fixture.bucket,
+                prefix: "recursive-search/",
+                delimiter: nil,
+                continuationToken: recursiveToken,
+                pageSize: 1_000
+            )
+            recursivePageNumber += 1
+            recursiveObjectCount += page.objects.count
+            if page.objects.contains(where: { $0.key.contains("needle") }) {
+                matchPage = recursivePageNumber
+            }
+            recursiveToken = page.nextContinuationToken
+        } while recursiveToken != nil
+        #expect(recursivePageNumber == 2)
+        #expect(recursiveObjectCount == 1_005)
+        #expect(matchPage == 2)
+        await #expect(throws: (any Error).self) {
+            _ = try await service.listObjects(
+                bucket: fixture.bucket,
+                prefix: "recursive-search/",
+                delimiter: nil,
+                continuationToken: "not-a-valid-continuation-token",
+                pageSize: 1_000
+            )
+        }
+
         let metadata = try await service.metadata(bucket: fixture.bucket, key: unicodeKey)
         #expect(metadata.size == payload.count)
         #expect(metadata.contentType == "text/plain; charset=utf-8")

@@ -147,6 +147,7 @@ struct ObjectRow: Identifiable, Hashable, Sendable {
   let id: String
   let key: String
   let displayName: String
+  let relativePath: String
   let size: Int64
   let modifiedAt: Date?
   let storageClass: String?
@@ -171,7 +172,10 @@ struct ObjectSortComparator: SortComparator, Sendable {
 
     switch column {
     case .name:
-      return ordered(lhs.displayName.localizedStandardCompare(rhs.displayName))
+      let nameComparison = lhs.displayName.localizedStandardCompare(rhs.displayName)
+      return ordered(
+        nameComparison == .orderedSame
+          ? lhs.key.localizedStandardCompare(rhs.key) : nameComparison)
     case .size:
       return ordered(compare(lhs.size, rhs.size))
     case .modified:
@@ -213,6 +217,12 @@ struct ObjectSortComparator: SortComparator, Sendable {
 
 struct ObjectPage: Sendable {
   let objects: [ObjectRow]
+  let continuationToken: String?
+}
+
+struct ObjectSearchPage: Sendable {
+  let objects: [ObjectRow]
+  let scannedObjectCount: Int
   let continuationToken: String?
 }
 
@@ -272,8 +282,11 @@ protocol WorkbenchServing: Sendable {
   func removeConnection(id: UUID) async throws
   func testConnection(_ draft: ConnectionDraft) async throws
   func listBuckets(connectionID: UUID) async throws -> [BucketRow]
-  func listObjects(at location: ObjectLocation, query: String, continuationToken: String?)
-    async throws -> ObjectPage
+  func listObjects(at location: ObjectLocation, continuationToken: String?) async throws
+    -> ObjectPage
+  func searchObjects(
+    at location: ObjectLocation, query: String, continuationToken: String?
+  ) async throws -> ObjectSearchPage
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails
   func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws
   func download(
@@ -321,9 +334,12 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
   func listBuckets(connectionID: UUID) async throws -> [BucketRow] {
     throw WorkbenchUIError.serviceUnavailable
   }
-  func listObjects(at location: ObjectLocation, query: String, continuationToken: String?)
-    async throws -> ObjectPage
+  func listObjects(at location: ObjectLocation, continuationToken: String?) async throws
+    -> ObjectPage
   { throw WorkbenchUIError.serviceUnavailable }
+  func searchObjects(
+    at location: ObjectLocation, query: String, continuationToken: String?
+  ) async throws -> ObjectSearchPage { throw WorkbenchUIError.serviceUnavailable }
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {
     throw WorkbenchUIError.serviceUnavailable
   }
