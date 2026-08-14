@@ -2,6 +2,20 @@
 
 All notable changes to S3Workbench are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-14
+
+### Added
+
+- Recursive, case-insensitive object search below the current prefix with complete pagination, progressive counters, cancellation, retry, and Reveal in Prefix.
+- Local sorting for the loaded Name, Size, Modified, and Storage class columns without extra S3 requests.
+- Versioned release DMGs with matching SHA-256 files for independent verification.
+
+### Changed
+
+- Existing rows remain visible during refreshes and recoverable failures, with delayed loading indicators and inline errors.
+- Stale browse, pagination, bucket, and search completions are rejected after navigation or cancellation.
+- Refined the app icon for the native macOS mask and added real interface screenshots to the README.
+
 ## [0.3.0] - 2026-08-12
 
 ### Added
@@ -44,3 +58,4 @@ All notable changes to S3Workbench are documented here. The project follows [Sem
 [0.1.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.1.0
 [0.2.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.2.0
 [0.3.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.3.0
+[0.4.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.4.0

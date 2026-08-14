@@ -65,7 +65,7 @@ Compatibility claims are deliberately conservative: only MinIO is covered by the
 
 S3Workbench requires macOS 15 or later on Apple Silicon.
 
-1. Download `S3Workbench.dmg` from the [latest release](https://github.com/romainfrezier/S3Workbench/releases/latest).
+1. Download the versioned `S3Workbench-X.Y.Z.dmg` and checksum from the [latest release](https://github.com/romainfrezier/S3Workbench/releases/latest), then verify them with `shasum -a 256 -c S3Workbench-X.Y.Z.dmg.sha256`.
 2. Open the disk image and drag S3Workbench to Applications.
 3. Launch the app and add your first connection.
 
@@ -126,8 +126,9 @@ Requirements:
 ```sh
 swift test
 scripts/integration-test.sh
-scripts/package-dmg.sh
-LAUNCH_TEST=1 scripts/verify-dmg.sh
+VERSION=0.4.0
+MARKETING_VERSION="$VERSION" scripts/package-dmg.sh
+MARKETING_VERSION="$VERSION" LAUNCH_TEST=1 scripts/verify-dmg.sh
 ```
 
 The integration environment is isolated, pinned by container digest, and removed on exit. It covers authentication, restricted bucket permissions, direct access roots, buckets, prefixes, pagination, unusual object names, metadata, upload/download/delete/move, presigned GET, and multipart upload with SHA-256 verification. See [Testing](docs/TESTING.md).

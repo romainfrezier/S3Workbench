@@ -6,7 +6,7 @@ Security fixes are provided for the latest published release.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | ✅ |
+| 0.4.x | ✅ |
 
 ## Reporting a vulnerability
 
@@ -26,4 +26,3 @@ Use GitHub's [private security advisory form](https://github.com/romainfrezier/S
 - Delete and move operations require explicit user actions. S3 move is copy-then-delete and is not atomic.
 
 No Developer ID identity is bundled in the repository. Release scripts use Developer ID signing and notarization only when explicitly configured; otherwise they apply ad-hoc signing and document Gatekeeper behavior.
-
