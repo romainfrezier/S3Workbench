@@ -461,6 +461,91 @@ import Testing
   #expect(model.history[1].utf8.elementsEqual("e\u{301}/".utf8))
 }
 
+@MainActor
+@Test func commandAvailabilityAndRoutingFollowTheCurrentSelection() async {
+  let connectionID = UUID()
+  let connection = restrictedConnection(id: connectionID)
+  let model = WorkbenchViewModel(
+    service: StubWorkbenchService(connections: [], listObjectsResult: .success(.empty)))
+  model.connections = [connection]
+  model.selectedConnectionID = connectionID
+  model.selectedBucket = "bucket"
+  model.prefix = "restricted/current/"
+  model.history = ["restricted/", "restricted/current/", "restricted/next/"]
+  model.historyIndex = 1
+
+  let first = searchObject(id: "first", key: "restricted/current/first.txt")
+  let second = searchObject(id: "second", key: "restricted/current/second.txt")
+  let prefix = ObjectRow(
+    id: "prefix", key: "restricted/current/folder/", displayName: "folder", relativePath: "",
+    size: 0, modifiedAt: nil, storageClass: nil, isPrefix: true)
+  let browsingCommands: Set<WorkbenchCommand> = [
+    .search, .upload, .refresh, .back, .forward, .toggleInspector,
+  ]
+
+  func routedCommands(
+    for model: WorkbenchViewModel, isModalPresented: Bool = false
+  ) -> Set<WorkbenchCommand> {
+    var routed: Set<WorkbenchCommand> = []
+    let context = WorkbenchCommandContext(
+      availability: WorkbenchCommandAvailability(
+        model: model, isModalPresented: isModalPresented)
+    ) { routed.insert($0) }
+    WorkbenchCommand.allCases.forEach(context.send)
+    return routed
+  }
+
+  model.objects = [first, second, prefix]
+  model.selectedObjectIDs = []
+  #expect(routedCommands(for: model) == browsingCommands)
+
+  model.selectedObjectIDs = [first.id]
+  #expect(
+    routedCommands(for: model)
+      == browsingCommands.union([.download, .quickLook, .delete]))
+
+  model.selectedObjectIDs = [first.id, second.id]
+  #expect(routedCommands(for: model) == browsingCommands.union([.download, .delete]))
+
+  model.selectedObjectIDs = [prefix.id]
+  #expect(routedCommands(for: model) == browsingCommands)
+
+  model.selectedObjectIDs = [first.id, prefix.id]
+  #expect(routedCommands(for: model) == browsingCommands)
+  #expect(routedCommands(for: model, isModalPresented: true).isEmpty)
+
+  model.selectedObjectIDs = [first.id]
+  model.selectedBucket = nil
+  let missingLocationCommands = routedCommands(for: model)
+  #expect(!missingLocationCommands.contains(.search))
+  #expect(!missingLocationCommands.contains(.upload))
+  #expect(!missingLocationCommands.contains(.download))
+  #expect(!missingLocationCommands.contains(.quickLook))
+  #expect(!missingLocationCommands.contains(.delete))
+
+  let result = searchObject(id: "result", key: "restricted/nested/needle.txt")
+  let searchService = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty)
+  ) { _, _, _ in
+    ObjectSearchPage(objects: [result], scannedObjectCount: 1, continuationToken: nil)
+  }
+  let searchModel = WorkbenchViewModel(service: searchService)
+  searchModel.connections = [connection]
+  searchModel.selectedConnectionID = connectionID
+  searchModel.selectedBucket = "bucket"
+  searchModel.prefix = "restricted/"
+  searchModel.searchQuery = "needle"
+  await searchModel.startSearch()
+  searchModel.select(result)
+
+  let searchResultCommands = routedCommands(for: searchModel)
+  #expect(searchModel.isSearchMode)
+  #expect(searchResultCommands.contains(.download))
+  #expect(searchResultCommands.contains(.quickLook))
+  #expect(searchResultCommands.contains(.delete))
+}
+
 @Test func configuredAccessRootRejectsLocationsAndKeysOutsideItsExactPrefix() throws {
   let connectionID = UUID()
   let root = try S3AccessRoot(path: "/bucket/restricted")
