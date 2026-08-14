@@ -7,23 +7,27 @@ actor CoreWorkbenchService: WorkbenchServing {
   typealias S3ServiceFactory = @Sendable (ConnectionProfile, S3Credentials) async throws
     -> any S3Service
 
-  enum TransferOperation: Sendable {
+  private enum DownloadDestination: Sendable {
+    case directory(URL, collisionPolicy: CollisionPolicy)
+    case file(URL)
+  }
+
+  private enum TransferOperation: Sendable {
     case upload(source: URL, location: ObjectLocation, collisionPolicy: CollisionPolicy)
     case download(
-      object: ObjectRow, location: ObjectLocation, directory: URL,
-      collisionPolicy: CollisionPolicy)
+      object: ObjectRow, location: ObjectLocation, destination: DownloadDestination)
 
     var title: String {
       switch self {
       case .upload(let source, _, _): source.lastPathComponent
-      case .download(let object, _, _, _): object.displayName
+      case .download(let object, _, _): object.displayName
       }
     }
 
     var subtitle: String {
       switch self {
       case .upload(_, let location, _): "Upload to \(location.bucket)"
-      case .download(_, let location, _, _): "Download from \(location.bucket)"
+      case .download(_, let location, _): "Download from \(location.bucket)"
       }
     }
   }
@@ -686,11 +690,21 @@ actor CoreWorkbenchService: WorkbenchServing {
     for object in objects where !object.isPrefix {
       try Task.checkCancellation()
       let operation = TransferOperation.download(
-        object: object, location: location, directory: directory,
-        collisionPolicy: collisionPolicy)
+        object: object,
+        location: location,
+        destination: .directory(directory, collisionPolicy: collisionPolicy))
       transferIDs.append(await enqueue(operation))
     }
     try await transferManager.waitForCompletion(of: transferIDs)
+  }
+
+  func download(object: ObjectRow, from location: ObjectLocation, to destination: URL) async throws {
+    let context = try await s3ServiceContext(at: location)
+    try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
+    try Task.checkCancellation()
+    let transferID = await enqueue(
+      .download(object: object, location: location, destination: .file(destination)))
+    try await transferManager.waitForCompletion(of: [transferID])
   }
 
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws {
@@ -842,22 +856,34 @@ actor CoreWorkbenchService: WorkbenchServing {
           bucket: location.bucket
         )
       }
-    case .download(let object, let location, let directory, let collisionPolicy):
+    case .download(let object, let location, let downloadDestination):
       let context = try await s3ServiceContext(at: location)
       try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
       service = context.service
-      let hasScope = directory.startAccessingSecurityScopedResource()
-      defer { if hasScope { directory.stopAccessingSecurityScopedResource() } }
-      let destination = try localDestinationURL(
-        directory: directory,
-        filename: safeFilename(object.displayName),
-        collisionPolicy: collisionPolicy
-      )
+      let destination: URL
+      let overwrite: Bool
+      let securityScopedURL: URL
+      switch downloadDestination {
+      case .directory(let directory, let collisionPolicy):
+        securityScopedURL = directory
+        destination = try localDestinationURL(
+          directory: directory,
+          filename: safeFilename(object.displayName),
+          collisionPolicy: collisionPolicy
+        )
+        overwrite = collisionPolicy == .replace
+      case .file(let file):
+        securityScopedURL = file.deletingLastPathComponent()
+        destination = file
+        overwrite = false
+      }
+      let hasScope = securityScopedURL.startAccessingSecurityScopedResource()
+      defer { if hasScope { securityScopedURL.stopAccessingSecurityScopedResource() } }
       try await service.downloadFile(
         bucket: location.bucket,
         key: object.key,
         to: destination,
-        overwrite: collisionPolicy == .replace
+        overwrite: overwrite
       ) { update in
         progress(update.fractionCompleted)
       }

@@ -327,6 +327,7 @@ protocol WorkbenchServing: Sendable {
     objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
     collisionPolicy: CollisionPolicy
   ) async throws
+  func download(object: ObjectRow, from location: ObjectLocation, to destination: URL) async throws
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws
   func move(
     object: ObjectRow, from location: ObjectLocation, toKey: String,
@@ -386,6 +387,9 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
     collisionPolicy: CollisionPolicy
   ) async throws
   { throw WorkbenchUIError.serviceUnavailable }
+  func download(object: ObjectRow, from location: ObjectLocation, to destination: URL) async throws {
+    throw WorkbenchUIError.serviceUnavailable
+  }
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws {
     throw WorkbenchUIError.serviceUnavailable
   }
@@ -435,12 +439,18 @@ extension Color {
 
 enum WorkbenchUIError: LocalizedError {
   case invalidConnection
+  case invalidExportFilename
   case serviceUnavailable
+  case staleFilePromise
 
   var errorDescription: String? {
     switch self {
     case .invalidConnection: "The connection settings are invalid."
+    case .invalidExportFilename:
+      "This object name can’t be exported as a macOS file. Rename the object first."
     case .serviceUnavailable: "The S3 service is not configured yet."
+    case .staleFilePromise:
+      "The location or selection changed before the drop completed. Drag the object again."
     }
   }
 }
