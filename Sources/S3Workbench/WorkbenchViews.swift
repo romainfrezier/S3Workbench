@@ -18,6 +18,7 @@ struct WorkbenchRootView: View {
   @State private var pendingDownloadDirectory: URL?
   @State private var isUploadCollisionPresented = false
   @State private var isDownloadCollisionPresented = false
+  @FocusState private var isSearchFocused: Bool
 
   var body: some View {
     NavigationSplitView {
@@ -33,6 +34,7 @@ struct WorkbenchRootView: View {
     .navigationSplitViewStyle(.balanced)
     .toolbar { toolbarContent }
     .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Search below this prefix")
+    .searchFocused($isSearchFocused)
     .onSubmit(of: .search) { Task { await model.startSearch() } }
     .onChange(of: model.searchQuery) { _, _ in
       Task { await model.searchQueryDidChange() }
@@ -126,6 +128,7 @@ struct WorkbenchRootView: View {
       Text(model.errorMessage ?? "Unknown error")
     }
     .quickLookPreview($model.previewURL)
+    .focusedSceneValue(\.workbenchCommandContext, commandContext)
     .task { await model.start() }
     .task(id: model.selectedConnectionID) {
       guard model.selectedConnectionID != nil else { return }
@@ -210,8 +213,12 @@ struct WorkbenchRootView: View {
       ObjectBrowserView(
         model: model,
         requestUpload: { isUploadPresented = true },
+        requestDownload: { selection in
+          model.selectedObjectIDs = selection
+          perform(.download)
+        },
         queueUpload: requestUpload,
-        requestDelete: { isDeleteConfirmationPresented = true },
+        requestDelete: { perform(.delete) },
         requestRename: { renameKey = $0 }
       )
     }
@@ -221,17 +228,17 @@ struct WorkbenchRootView: View {
   private var toolbarContent: some ToolbarContent {
     ToolbarItemGroup(placement: .navigation) {
       Button {
-        Task { await model.goBack() }
+        perform(.back)
       } label: {
         Label("Back", systemImage: "chevron.left")
       }
-      .disabled(!model.canGoBack)
+      .disabled(!commandAvailability.isEnabled(.back))
       Button {
-        Task { await model.goForward() }
+        perform(.forward)
       } label: {
         Label("Forward", systemImage: "chevron.right")
       }
-      .disabled(!model.canGoForward)
+      .disabled(!commandAvailability.isEnabled(.forward))
     }
 
     ToolbarItem(placement: .principal) {
@@ -240,27 +247,17 @@ struct WorkbenchRootView: View {
 
     ToolbarItemGroup(placement: .primaryAction) {
       Button {
-        isUploadPresented = true
+        perform(.upload)
       } label: {
         Label("Upload", systemImage: "square.and.arrow.up")
       }
-      .keyboardShortcut("u", modifiers: .command)
-      .disabled(model.location == nil)
+      .disabled(!commandAvailability.isEnabled(.upload))
       Button {
-        Task {
-          if model.selectedBucket == nil {
-            await model.reloadConnection()
-          } else if model.isSearchMode {
-            await model.startSearch()
-          } else {
-            await model.reloadObjects()
-          }
-        }
+        perform(.refresh)
       } label: {
         Label("Refresh", systemImage: "arrow.clockwise")
       }
-      .keyboardShortcut("r", modifiers: .command)
-      .disabled(model.selectedConnection == nil)
+      .disabled(!commandAvailability.isEnabled(.refresh))
 
       Button {
         isTransferPopoverPresented.toggle()
@@ -273,34 +270,80 @@ struct WorkbenchRootView: View {
       }
 
       Button {
-        isInspectorPresented.toggle()
+        perform(.toggleInspector)
       } label: {
         Label("Inspector", systemImage: "sidebar.right")
       }
-      .keyboardShortcut("i", modifiers: [.command, .option])
+      .disabled(!commandAvailability.isEnabled(.toggleInspector))
 
       Menu {
-        Button("Quick Look") { Task { await model.previewSelected() } }
-          .keyboardShortcut(.space, modifiers: [])
-          .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
+        Button("Quick Look") { perform(.quickLook) }
+          .disabled(!commandAvailability.isEnabled(.quickLook))
         if model.isSearchMode {
           Button("Reveal in Prefix") { Task { await model.revealSelectedInPrefix() } }
             .disabled(model.selectedObject == nil)
         }
-        Button("Download…") { isDownloadDestinationPresented = true }
-          .disabled(
-            model.selectedObjects.isEmpty || model.selectedObjects.contains(where: \.isPrefix))
+        Button("Download…") { perform(.download) }
+          .disabled(!commandAvailability.isEnabled(.download))
         Button("Copy Presigned URL") { copyPresignedURL() }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
         Button("Rename…") { renameKey = model.selectedObject?.key }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
         Divider()
-        Button("Delete…", role: .destructive) { isDeleteConfirmationPresented = true }
-          .disabled(
-            model.selectedObjects.isEmpty || model.selectedObjects.contains(where: \.isPrefix))
+        Button("Delete…", role: .destructive) { perform(.delete) }
+          .disabled(!commandAvailability.isEnabled(.delete))
       } label: {
         Label("More", systemImage: "ellipsis.circle")
       }
+    }
+  }
+
+  private var isModalPresented: Bool {
+    connectionDraft != nil || renameKey != nil || connectionToDelete != nil
+      || isUploadPresented || isDownloadDestinationPresented
+      || isUploadCollisionPresented || isDownloadCollisionPresented
+      || isDeleteConfirmationPresented || model.errorMessage != nil || model.previewURL != nil
+  }
+
+  private var commandAvailability: WorkbenchCommandAvailability {
+    WorkbenchCommandAvailability(model: model, isModalPresented: isModalPresented)
+  }
+
+  private var commandContext: WorkbenchCommandContext {
+    WorkbenchCommandContext(availability: commandAvailability, perform: perform)
+  }
+
+  private func perform(_ command: WorkbenchCommand) {
+    guard commandAvailability.isEnabled(command) else { return }
+    switch command {
+    case .search:
+      isSearchFocused = true
+    case .download:
+      isDownloadDestinationPresented = true
+    case .upload:
+      isUploadPresented = true
+    case .refresh:
+      Task { await refresh() }
+    case .back:
+      Task { await model.goBack() }
+    case .forward:
+      Task { await model.goForward() }
+    case .quickLook:
+      Task { await model.previewSelected() }
+    case .toggleInspector:
+      isInspectorPresented.toggle()
+    case .delete:
+      isDeleteConfirmationPresented = true
+    }
+  }
+
+  private func refresh() async {
+    if model.selectedBucket == nil {
+      await model.reloadConnection()
+    } else if model.isSearchMode {
+      await model.startSearch()
+    } else {
+      await model.reloadObjects()
     }
   }
 
@@ -415,6 +458,7 @@ private struct BucketBrowserView: View {
 private struct ObjectBrowserView: View {
   @Bindable var model: WorkbenchViewModel
   let requestUpload: () -> Void
+  let requestDownload: (Set<ObjectRow.ID>) -> Void
   let queueUpload: ([URL]) -> Void
   let requestDelete: () -> Void
   let requestRename: (String) -> Void
@@ -501,7 +545,8 @@ private struct ObjectBrowserView: View {
         !model.objects.contains(where: { selection.contains($0.id) && $0.isPrefix })
       {
         Divider()
-        Button("Delete", role: .destructive) {
+        Button("Download…") { requestDownload(selection) }
+        Button("Delete…", role: .destructive) {
           model.selectedObjectIDs = selection
           requestDelete()
         }
@@ -859,7 +904,6 @@ private struct ObjectInspectorView: View {
                 .textSelection(.enabled)
               if !object.isPrefix {
                 Button("Quick Look") { Task { await model.previewSelected() } }
-                  .keyboardShortcut(.space, modifiers: [])
               }
             }
             .frame(maxWidth: .infinity)
