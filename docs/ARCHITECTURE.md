@@ -35,6 +35,12 @@ System TLS trust is the default. A custom PEM CA can be scoped to one connection
 
 Downloads are file-backed and streamed. Uploads use file-backed SDK streams; large files use multipart upload with bounded part sizes. Rename is copy then delete and is therefore non-atomic. The source is deleted only after a successful copy response.
 
+## Object search
+
+Recursive search stays behind `WorkbenchServing`; SwiftUI never lists S3 objects or queries the cache directly. A query containing `/` pushes every byte through the last slash into the S3 `ListObjectsV2` prefix, then matches the remaining segment locally. Object keys and repeated slashes are not normalized.
+
+The first unqualified search walks every paginated object below the connection's configured access root and builds a disposable SQLite FTS5 index in Application Support. New generations are page-bounded and become visible only after the final S3 page succeeds. An interrupted build is discarded while the previous complete generation remains searchable. Later searches query the active generation locally; uploads, moves, and deletes performed by the app update it opportunistically, and deleting or editing a connection removes its cached scopes.
+
 ## UI
 
 Standard SwiftUI `NavigationSplitView`, `Table`, `inspector`, toolbar, sheets, commands, and Quick Look APIs provide native macOS behavior and automatically adopt Liquid Glass on current systems. Glass remains a navigation/control layer; the object table and inspector content remain clear and opaque. The deployment target is macOS 15, with macOS 26 enhancements availability-gated.

@@ -22,6 +22,8 @@ Use GitHub's [private security advisory form](https://github.com/romainfrezier/S
 - Disabling TLS verification is intentionally unsupported. Plain HTTP is available only when explicitly configured and exposes credentials and object contents to the network.
 - Presigned URLs are bearer credentials. The app does not log their query strings.
 - User-facing errors redact authorization headers, credentials, signatures, and session tokens.
+- The local search index stores object keys and non-secret listing metadata in a user-only SQLite file under Application Support. It never stores credentials, authorization data, endpoints, or presigned URLs; connection removal deletes its indexed scopes.
+- Search scopes are bounded by the configured bucket and direct access prefix. Prefix parsing preserves exact key bytes and never broadens a restricted root.
 - Download destinations and upload sources are user-selected. The app does not crawl unrelated files.
 - Delete and move operations require explicit user actions. S3 move is copy-then-delete and is not atomic.
 
