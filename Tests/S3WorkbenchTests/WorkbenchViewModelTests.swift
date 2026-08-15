@@ -107,6 +107,56 @@ import Testing
 }
 
 @MainActor
+@Test func loadingRemainingPagesPreservesSelectionAndCompletesTheSnapshot() async {
+  let first = searchObject(id: "first", key: "first.txt")
+  let second = searchObject(id: "second", key: "second.txt")
+  let third = searchObject(id: "third", key: "third.txt")
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty),
+    listObjectsHandler: { _, token in
+      switch token {
+      case nil: return ObjectPage(objects: [first], continuationToken: "page-2")
+      case "page-2": return ObjectPage(objects: [second], continuationToken: "page-3")
+      case "page-3": return ObjectPage(objects: [third], continuationToken: nil)
+      default: throw S3ServiceError.service("Unexpected pagination token.")
+      }
+    }
+  )
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+
+  await model.reloadObjects()
+  model.select(first)
+  await model.loadRemainingObjects()
+
+  #expect(model.objects == [first, second, third])
+  #expect(model.selectedObjectIDs == [first.id])
+  #expect(model.continuationToken == nil)
+  #expect(!model.isLoadingMore)
+}
+
+@MainActor
+@Test func loadingRemainingPagesStopsWhenAProviderCyclesPaginationTokens() async {
+  let probe = RevealCycleProbe()
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty),
+    listObjectsHandler: { _, token in await probe.page(continuationToken: token) }
+  )
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+
+  await model.reloadObjects()
+  await model.loadRemainingObjects()
+
+  #expect(await probe.callCount == 3)
+  #expect(model.paginationErrorMessage == "The server returned a repeated object pagination token.")
+}
+
+@MainActor
 @Test func latePaginationCannotAppendAfterRefreshingTheSamePrefix() async {
   let initial = searchObject(id: "initial", key: "initial.txt")
   let fresh = searchObject(id: "fresh", key: "fresh.txt")

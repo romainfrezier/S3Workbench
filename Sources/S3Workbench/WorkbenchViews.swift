@@ -516,6 +516,23 @@ private struct ObjectBrowserView: View {
         Task { await model.previewSelected() }
       }
     }
+    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+      geometry.contentSize.height - geometry.visibleRect.maxY
+    } action: { _, distanceFromBottom in
+      guard distanceFromBottom < 200, sortOrder.isEmpty, !model.isSearchMode,
+        model.continuationToken != nil, !model.isLoadingMore,
+        model.paginationErrorMessage == nil
+      else { return }
+      Task { await model.loadMore() }
+    }
+    .onChange(of: sortOrder.isEmpty) { _, isEmpty in
+      guard !isEmpty else { return }
+      Task { await model.loadRemainingObjects() }
+    }
+    .onChange(of: model.continuationToken) { _, continuationToken in
+      guard !sortOrder.isEmpty, continuationToken != nil else { return }
+      Task { await model.loadRemainingObjects() }
+    }
     .overlay {
       if model.isSearching, model.objects.isEmpty {
         if model.isSearchLoadingIndicatorVisible {
@@ -629,20 +646,20 @@ private struct ObjectBrowserView: View {
         RefreshErrorBanner(
           message: error,
           secondaryMessage: model.paginationErrorSecondaryMessage
-        ) { Task { await model.loadMore() } }
-      } else if !model.isSearchMode, model.continuationToken != nil {
-        Button { Task { await model.loadMore() } } label: {
-          HStack(spacing: 8) {
-            if model.isPaginationLoadingIndicatorVisible {
-              ProgressView().controlSize(.small)
+        ) {
+          Task {
+            if sortOrder.isEmpty {
+              await model.loadMore()
+            } else {
+              await model.loadRemainingObjects()
             }
-            Text(model.isPaginationLoadingIndicatorVisible ? "Loading…" : "Load More")
           }
         }
-          .disabled(model.isLoadingMore)
-          .padding(8)
-          .frame(maxWidth: .infinity)
-          .background(.bar)
+      } else if !model.isSearchMode, model.isLoadingMore,
+        model.isPaginationLoadingIndicatorVisible
+      {
+        RefreshProgressBanner(
+          title: sortOrder.isEmpty ? "Loading more objects…" : "Loading all objects to sort…")
       }
     }
     .navigationTitle(model.selectedBucket ?? "Objects")

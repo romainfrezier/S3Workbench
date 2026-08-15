@@ -362,10 +362,7 @@ final class WorkbenchViewModel {
       let token = continuationToken
     {
       guard seenTokens.insert(token).inserted else {
-        let error = S3ServiceError.service(
-          "The server returned a repeated object pagination token.")
-        paginationErrorMessage = error.localizedDescription
-        paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
+        reportRepeatedPaginationToken()
         break
       }
       guard await loadMore(), objectLoadGeneration == generation,
@@ -405,6 +402,17 @@ final class WorkbenchViewModel {
       paginationErrorMessage = error.localizedDescription
       paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
       return false
+    }
+  }
+
+  func loadRemainingObjects() async {
+    var seenTokens = Set<String>()
+    while let token = continuationToken {
+      guard seenTokens.insert(token).inserted else {
+        reportRepeatedPaginationToken()
+        return
+      }
+      guard await loadMore() else { return }
     }
   }
 
@@ -678,6 +686,13 @@ final class WorkbenchViewModel {
     default:
       "The cloud returned a plot twist."
     }
+  }
+
+  private func reportRepeatedPaginationToken() {
+    let error = S3ServiceError.service(
+      "The server returned a repeated object pagination token.")
+    paginationErrorMessage = error.localizedDescription
+    paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
   }
 
   @discardableResult
