@@ -327,6 +327,56 @@ import Testing
   #expect(combiningRow.relativePath == "folder/")
 }
 
+@Test func recursiveSearchPushesExactSlashPrefixToS3() throws {
+  let plan = CoreWorkbenchService.recursiveSearchPlan(
+    below: "restricted/",
+    query: "Parent//雪 #?/Needle"
+  )
+
+  #expect(plan.listingPrefix.utf8.elementsEqual("restricted/Parent//雪 #?/".utf8))
+  #expect(plan.matchingPrefix.utf8.elementsEqual(plan.listingPrefix.utf8))
+  #expect(plan.matchingQuery == "Needle")
+
+  let match = S3Object(
+    key: "restricted/Parent//雪 #?/nested/needle.TXT",
+    size: 1,
+    lastModified: nil,
+    eTag: nil,
+    storageClass: nil
+  )
+  let sibling = S3Object(
+    key: "restricted/sibling/needle.TXT",
+    size: 1,
+    lastModified: nil,
+    eTag: nil,
+    storageClass: nil
+  )
+
+  #expect(
+    CoreWorkbenchService.recursiveSearchRow(
+      match,
+      below: "restricted/",
+      matching: plan.matchingQuery,
+      matchingBelow: plan.matchingPrefix
+    ) != nil
+  )
+  #expect(
+    CoreWorkbenchService.recursiveSearchRow(
+      sibling,
+      below: "restricted/",
+      matching: plan.matchingQuery,
+      matchingBelow: plan.matchingPrefix
+    ) == nil
+  )
+
+  let trailingSlash = CoreWorkbenchService.recursiveSearchPlan(
+    below: "restricted/",
+    query: "Parent//"
+  )
+  #expect(trailingSlash.listingPrefix.utf8.elementsEqual("restricted/Parent//".utf8))
+  #expect(trailingSlash.matchingQuery.isEmpty)
+}
+
 @MainActor
 @Test func canonicallyEquivalentS3KeysRemainDistinctRowsAndSelections() async {
   let composedKey = "restricted/é.txt"

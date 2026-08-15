@@ -39,6 +39,12 @@ actor CoreWorkbenchService: WorkbenchServing {
     let task: Task<S3ServiceContext, Error>
   }
 
+  struct RecursiveSearchPlan: Equatable, Sendable {
+    let listingPrefix: String
+    let matchingPrefix: String
+    let matchingQuery: String
+  }
+
   private let connectionStore: ConnectionStore
   private let credentialStore: any CredentialStore
   private let connectionProfilesLoader: ConnectionProfilesLoader
@@ -245,33 +251,71 @@ actor CoreWorkbenchService: WorkbenchServing {
     guard !query.isEmpty else {
       throw S3ServiceError.invalidConfiguration("Enter a search query.")
     }
+    let plan = Self.recursiveSearchPlan(below: location.prefix, query: query)
     let page = try await s3Service(at: location).listObjects(
       bucket: location.bucket,
-      prefix: location.prefix,
+      prefix: plan.listingPrefix,
       delimiter: nil,
       continuationToken: continuationToken,
       pageSize: 1_000
     )
     return ObjectSearchPage(
       objects: page.objects.compactMap {
-        Self.recursiveSearchRow($0, below: location.prefix, matching: query)
+        Self.recursiveSearchRow(
+          $0,
+          below: location.prefix,
+          matching: plan.matchingQuery,
+          matchingBelow: plan.matchingPrefix
+        )
       },
       scannedObjectCount: page.objects.count,
       continuationToken: page.nextContinuationToken
     )
   }
 
+  nonisolated static func recursiveSearchPlan(
+    below prefix: String,
+    query: String
+  ) -> RecursiveSearchPlan {
+    let queryBytes = query.utf8
+    guard let separator = queryBytes.lastIndex(of: 0x2F) else {
+      return RecursiveSearchPlan(
+        listingPrefix: prefix,
+        matchingPrefix: prefix,
+        matchingQuery: query
+      )
+    }
+
+    let pathEnd = queryBytes.index(after: separator)
+    let listingPrefix = String(
+      decoding: Array(prefix.utf8) + queryBytes[..<pathEnd],
+      as: UTF8.self
+    )
+    return RecursiveSearchPlan(
+      listingPrefix: listingPrefix,
+      matchingPrefix: listingPrefix,
+      matchingQuery: String(decoding: queryBytes[pathEnd...], as: UTF8.self)
+    )
+  }
+
   nonisolated static func recursiveSearchRow(
     _ object: S3Object,
     below prefix: String,
-    matching query: String
+    matching query: String,
+    matchingBelow matchingPrefix: String? = nil
   ) -> ObjectRow? {
     guard !bytesEqual(object.key, prefix), bytesStart(object.key, with: prefix) else {
       return nil
     }
+    let matchingPrefix = matchingPrefix ?? prefix
+    guard bytesStart(object.key, with: matchingPrefix) else { return nil }
     let relativeBytes = object.key.utf8.dropFirst(prefix.utf8.count)
     let relativeKey = String(decoding: relativeBytes, as: UTF8.self)
-    guard relativeKey.range(of: query, options: .caseInsensitive) != nil else { return nil }
+    let matchingBytes = object.key.utf8.dropFirst(matchingPrefix.utf8.count)
+    let matchingKey = String(decoding: matchingBytes, as: UTF8.self)
+    guard query.isEmpty || matchingKey.range(of: query, options: .caseInsensitive) != nil else {
+      return nil
+    }
 
     var nameEnd = relativeBytes.endIndex
     while nameEnd != relativeBytes.startIndex {
