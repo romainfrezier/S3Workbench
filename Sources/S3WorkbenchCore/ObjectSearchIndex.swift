@@ -280,8 +280,12 @@ public actor ObjectSearchIndex {
                 try deleteEntry(key: object.key, scopeID: scope.id, generation: scope.generation)
                 try insert(object, scopeID: scope.id, generation: scope.generation)
                 try updateCount(scopeID: scope.id, generation: scope.generation)
-                try markBuildDirty(scopeID: scope.id)
             }
+            try markMatchingBuildsDirty(
+                connectionID: connectionID,
+                bucket: bucket,
+                key: object.key
+            )
         }
     }
 
@@ -295,8 +299,12 @@ public actor ObjectSearchIndex {
             for scope in scopes where bytesStart(key, with: scope.prefix) {
                 try deleteEntry(key: key, scopeID: scope.id, generation: scope.generation)
                 try updateCount(scopeID: scope.id, generation: scope.generation)
-                try markBuildDirty(scopeID: scope.id)
             }
+            try markMatchingBuildsDirty(
+                connectionID: connectionID,
+                bucket: bucket,
+                key: key
+            )
         }
     }
 
@@ -594,6 +602,34 @@ public actor ObjectSearchIndex {
             try bind(scopeID, to: 1, in: statement)
             try stepDone(statement)
         }
+    }
+
+    private func markMatchingBuildsDirty(
+        connectionID: UUID,
+        bucket: String,
+        key: String
+    ) throws {
+        let scopeIDs = try database.withStatement(
+            """
+            SELECT search_scopes.scope_id, search_scopes.root_prefix
+            FROM search_scopes
+            INNER JOIN search_builds ON search_builds.scope_id = search_scopes.scope_id
+            WHERE search_scopes.connection_id = ? AND search_scopes.bucket = ?
+            """
+        ) { statement in
+            try bind(connectionID.uuidString, to: 1, in: statement)
+            try bind(Data(bucket.utf8), to: 2, in: statement)
+            var scopeIDs: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let scopeID = text(statement, column: 0),
+                    let prefixData = data(statement, column: 1)
+                else { throw ObjectSearchIndexError.unavailable }
+                let prefix = String(decoding: prefixData, as: UTF8.self)
+                if bytesStart(key, with: prefix) { scopeIDs.append(scopeID) }
+            }
+            return scopeIDs
+        }
+        for scopeID in scopeIDs { try markBuildDirty(scopeID: scopeID) }
     }
 
     private func entryCount(scopeID: String, generation: String) throws -> Int {

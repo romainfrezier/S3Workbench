@@ -8,6 +8,8 @@ import Testing
     defer { fixture.cleanup() }
     let scope = fixture.scope
     let index = try ObjectSearchIndex(fileURL: fixture.databaseURL)
+    let attributes = try FileManager.default.attributesOfItem(atPath: fixture.databaseURL.path)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
     let build = try await index.beginRebuild(for: scope)
     try await index.append(
         [
@@ -42,7 +44,9 @@ import Testing
 
     let reopened = try ObjectSearchIndex(fileURL: fixture.databaseURL)
     let reopenedSnapshot = try #require(try await reopened.snapshot(for: scope))
-    #expect(reopenedSnapshot == snapshot)
+    #expect(reopenedSnapshot.objectCount == snapshot.objectCount)
+    #expect(reopenedSnapshot.isStale == snapshot.isStale)
+    #expect(abs(reopenedSnapshot.indexedAt.timeIntervalSince(snapshot.indexedAt)) < 0.001)
     let reopenedPage = try #require(
         try await reopened.search(
             scope: scope,
@@ -72,7 +76,11 @@ import Testing
         )
     )
     #expect(whileBuilding.objects.map(\.key) == ["restricted/old.txt"])
-    #expect(whileBuilding.snapshot == firstSnapshot)
+    #expect(whileBuilding.snapshot.objectCount == firstSnapshot.objectCount)
+    #expect(whileBuilding.snapshot.isStale == firstSnapshot.isStale)
+    #expect(
+        abs(whileBuilding.snapshot.indexedAt.timeIntervalSince(firstSnapshot.indexedAt)) < 0.001
+    )
     try await index.cancelRebuild(cancelled)
 
     let replacement = try await index.beginRebuild(for: fixture.scope)
@@ -173,6 +181,24 @@ import Testing
         )
     )
     #expect(page.objects.map(\.key) == ["restricted/complete.txt"])
+}
+
+@Test func objectSearchIndexMarksAnInitialBuildStaleWhenObjectsMutateDuringItsScan() async throws {
+    let fixture = try SearchIndexFixture()
+    defer { fixture.cleanup() }
+    let index = try ObjectSearchIndex(fileURL: fixture.databaseURL)
+    let build = try await index.beginRebuild(for: fixture.scope)
+    try await index.append([indexedObject("restricted/listed.txt")], to: build)
+
+    try await index.upsert(
+        indexedObject("restricted/uploaded-after-page.txt"),
+        connectionID: fixture.scope.connectionID,
+        bucket: fixture.scope.bucket
+    )
+    let snapshot = try await index.finishRebuild(build)
+
+    #expect(snapshot.objectCount == 1)
+    #expect(snapshot.isStale)
 }
 
 @Test func objectSearchIndexRejectsNewerSchemaWithoutRewritingIt() throws {

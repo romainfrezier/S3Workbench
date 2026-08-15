@@ -39,6 +39,23 @@ actor CoreWorkbenchService: WorkbenchServing {
     let task: Task<S3ServiceContext, Error>
   }
 
+  private struct SearchContinuation: Codable {
+    enum Mode: String, Codable {
+      case remote
+      case localIndex
+    }
+
+    let mode: Mode
+    let remoteToken: String?
+    let buildID: UUID?
+    let localCursor: Int64?
+  }
+
+  private struct SearchIndexBuildSession: Sendable {
+    let build: ObjectIndexBuild
+    let scope: ObjectIndexScope
+  }
+
   struct RecursiveSearchPlan: Equatable, Sendable {
     let listingPrefix: String
     let matchingPrefix: String
@@ -49,13 +66,16 @@ actor CoreWorkbenchService: WorkbenchServing {
   private let credentialStore: any CredentialStore
   private let connectionProfilesLoader: ConnectionProfilesLoader
   private let s3ServiceFactory: S3ServiceFactory
+  private let searchIndex: ObjectSearchIndex?
   private let transferManager = TransferManager<TransferOperation>(maximumConcurrentTransfers: 4)
   private var s3ServiceContexts: [UUID: S3ServiceContext] = [:]
   private var s3ServiceContextLoads: [UUID: S3ServiceContextLoad] = [:]
   private var s3ServiceContextGenerations: [UUID: UInt64] = [:]
+  private var searchIndexBuilds: [UUID: SearchIndexBuildSession] = [:]
 
   init(
     connectionStore: ConnectionStore,
+    searchIndex: ObjectSearchIndex? = nil,
     credentialStore: any CredentialStore = KeychainCredentialStore(),
     connectionProfilesLoader: ConnectionProfilesLoader? = nil,
     s3ServiceFactory: @escaping S3ServiceFactory = { profile, credentials in
@@ -63,13 +83,18 @@ actor CoreWorkbenchService: WorkbenchServing {
     }
   ) {
     self.connectionStore = connectionStore
+    self.searchIndex = searchIndex
     self.credentialStore = credentialStore
     self.connectionProfilesLoader = connectionProfilesLoader ?? { try await connectionStore.load() }
     self.s3ServiceFactory = s3ServiceFactory
   }
 
   static func live() throws -> CoreWorkbenchService {
-    CoreWorkbenchService(connectionStore: try .applicationSupport())
+    let connectionStore = try ConnectionStore.applicationSupport()
+    return CoreWorkbenchService(
+      connectionStore: connectionStore,
+      searchIndex: try? ObjectSearchIndex.applicationSupport()
+    )
   }
 
   func loadConnections() async throws -> [ConnectionRow] {
@@ -103,6 +128,8 @@ actor CoreWorkbenchService: WorkbenchServing {
         try credentialStore.save(credentials, for: profile.id)
       }
       _ = try await connectionStore.upsert(profile)
+      await abandonSearchIndexBuilds(connectionID: draft.id)
+      try? await searchIndex?.remove(connectionID: draft.id)
     } catch {
       if let previousCredentials {
         try? credentialStore.save(previousCredentials, for: draft.id)
@@ -169,6 +196,8 @@ actor CoreWorkbenchService: WorkbenchServing {
     try credentialStore.remove(for: id)
     do {
       _ = try await connectionStore.remove(id: id)
+      await abandonSearchIndexBuilds(connectionID: id)
+      try? await searchIndex?.remove(connectionID: id)
     } catch {
       if let credentials { try? credentialStore.save(credentials, for: id) }
       throw error
@@ -246,19 +275,198 @@ actor CoreWorkbenchService: WorkbenchServing {
   func searchObjects(
     at location: ObjectLocation,
     query: String,
-    continuationToken: String?
+    continuationToken: String?,
+    refreshIndex: Bool
   ) async throws -> ObjectSearchPage {
     guard !query.isEmpty else {
       throw S3ServiceError.invalidConfiguration("Enter a search query.")
     }
+    let context = try await s3ServiceContext(at: location)
     let plan = Self.recursiveSearchPlan(below: location.prefix, query: query)
-    let page = try await s3Service(at: location).listObjects(
+    let scope = ObjectIndexScope(
+      connectionID: location.connectionID,
       bucket: location.bucket,
-      prefix: plan.listingPrefix,
-      delimiter: nil,
-      continuationToken: continuationToken,
-      pageSize: 1_000
+      prefix: context.accessRoot?.prefix ?? ""
     )
+
+    if let continuationToken {
+      let continuation = try Self.decodeSearchContinuation(continuationToken)
+      switch continuation.mode {
+      case .localIndex:
+        guard let cursor = continuation.localCursor else {
+          throw S3ServiceError.service("The local search cursor is invalid.")
+        }
+        do {
+          guard let page = try await indexedSearchPage(
+            scope: scope,
+            location: location,
+            plan: plan,
+            after: cursor
+          ) else {
+            throw S3ServiceError.service(
+              "The local search cursor expired. Run the search again.")
+          }
+          return page
+        } catch is CancellationError {
+          throw CancellationError()
+        } catch {
+          throw S3ServiceError.service("The local search cursor expired. Run the search again.")
+        }
+      case .remote:
+        guard let remoteToken = continuation.remoteToken else {
+          throw S3ServiceError.service("The object search cursor is invalid.")
+        }
+        return try await remoteSearchPage(
+          service: context.service,
+          scope: scope,
+          location: location,
+          plan: plan,
+          listingPrefix: continuation.buildID == nil ? plan.listingPrefix : scope.prefix,
+          remoteToken: remoteToken,
+          buildID: continuation.buildID
+        )
+      }
+    }
+
+    await abandonSearchIndexBuilds(for: scope)
+    try Task.checkCancellation()
+    if !refreshIndex {
+      do {
+        if let page = try await indexedSearchPage(
+          scope: scope,
+          location: location,
+          plan: plan,
+          after: nil
+        ) {
+          return page
+        }
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        // A disposable local cache must never make remote search unavailable.
+      }
+    }
+
+    try Task.checkCancellation()
+    let isPathQualified = !Self.bytesEqual(plan.listingPrefix, location.prefix)
+    guard let searchIndex, refreshIndex || !isPathQualified,
+      let build = try? await searchIndex.beginRebuild(for: scope)
+    else {
+      return try await remoteSearchPage(
+        service: context.service,
+        scope: scope,
+        location: location,
+        plan: plan,
+        listingPrefix: plan.listingPrefix,
+        remoteToken: nil,
+        buildID: nil
+      )
+    }
+
+    let buildID = UUID()
+    searchIndexBuilds[buildID] = SearchIndexBuildSession(build: build, scope: scope)
+    return try await remoteSearchPage(
+      service: context.service,
+      scope: scope,
+      location: location,
+      plan: plan,
+      listingPrefix: scope.prefix,
+      remoteToken: nil,
+      buildID: buildID
+    )
+  }
+
+  private func indexedSearchPage(
+    scope: ObjectIndexScope,
+    location: ObjectLocation,
+    plan: RecursiveSearchPlan,
+    after cursor: Int64?
+  ) async throws -> ObjectSearchPage? {
+    guard let searchIndex,
+      let page = try await searchIndex.search(
+        scope: scope,
+        matching: plan.matchingQuery,
+        below: plan.matchingPrefix,
+        after: cursor
+      )
+    else { return nil }
+    let continuationToken = try page.continuationCursor.map {
+      try Self.encodeSearchContinuation(
+        SearchContinuation(
+          mode: .localIndex,
+          remoteToken: nil,
+          buildID: nil,
+          localCursor: $0
+        )
+      )
+    }
+    return ObjectSearchPage(
+      objects: page.objects.compactMap {
+        Self.recursiveSearchRow(
+          $0,
+          below: location.prefix,
+          matching: plan.matchingQuery,
+          matchingBelow: plan.matchingPrefix
+        )
+      },
+      scannedObjectCount: 0,
+      continuationToken: continuationToken,
+      indexSnapshot: page.snapshot
+    )
+  }
+
+  private func remoteSearchPage(
+    service: any S3Service,
+    scope: ObjectIndexScope,
+    location: ObjectLocation,
+    plan: RecursiveSearchPlan,
+    listingPrefix: String,
+    remoteToken: String?,
+    buildID: UUID?
+  ) async throws -> ObjectSearchPage {
+    let page: S3ObjectPage
+    do {
+      page = try await service.listObjects(
+        bucket: location.bucket,
+        prefix: listingPrefix,
+        delimiter: nil,
+        continuationToken: remoteToken,
+        pageSize: 1_000
+      )
+      try Task.checkCancellation()
+    } catch {
+      if let buildID { await abandonSearchIndexBuild(id: buildID) }
+      throw error
+    }
+
+    var activeBuildID = buildID
+    var indexSnapshot: ObjectIndexSnapshot?
+    if let buildID, let session = searchIndexBuilds[buildID], let searchIndex {
+      do {
+        try await searchIndex.append(page.objects, to: session.build)
+        if page.nextContinuationToken == nil {
+          indexSnapshot = try await searchIndex.finishRebuild(session.build)
+          searchIndexBuilds[buildID] = nil
+          activeBuildID = nil
+        }
+      } catch {
+        await abandonSearchIndexBuild(id: buildID)
+        activeBuildID = nil
+      }
+    } else {
+      activeBuildID = nil
+    }
+
+    let continuationToken = try page.nextContinuationToken.map {
+      try Self.encodeSearchContinuation(
+        SearchContinuation(
+          mode: .remote,
+          remoteToken: $0,
+          buildID: activeBuildID,
+          localCursor: nil
+        )
+      )
+    }
     return ObjectSearchPage(
       objects: page.objects.compactMap {
         Self.recursiveSearchRow(
@@ -269,8 +477,60 @@ actor CoreWorkbenchService: WorkbenchServing {
         )
       },
       scannedObjectCount: page.objects.count,
-      continuationToken: page.nextContinuationToken
+      continuationToken: continuationToken,
+      indexSnapshot: indexSnapshot,
+      isBuildingIndex: activeBuildID != nil
     )
+  }
+
+  private func abandonSearchIndexBuilds(for scope: ObjectIndexScope) async {
+    let ids = searchIndexBuilds.compactMap { id, session in
+      session.scope == scope ? id : nil
+    }
+    for id in ids { await abandonSearchIndexBuild(id: id) }
+  }
+
+  private func abandonSearchIndexBuilds(connectionID: UUID) async {
+    let ids = searchIndexBuilds.compactMap { id, session in
+      session.scope.connectionID == connectionID ? id : nil
+    }
+    for id in ids { await abandonSearchIndexBuild(id: id) }
+  }
+
+  func cancelObjectSearch(at location: ObjectLocation) async {
+    let ids = searchIndexBuilds.compactMap { id, session in
+      session.scope.connectionID == location.connectionID
+        && Self.bytesEqual(session.scope.bucket, location.bucket) ? id : nil
+    }
+    for id in ids { await abandonSearchIndexBuild(id: id) }
+  }
+
+  private func abandonSearchIndexBuild(id: UUID) async {
+    guard let session = searchIndexBuilds.removeValue(forKey: id) else { return }
+    try? await searchIndex?.cancelRebuild(session.build)
+  }
+
+  private nonisolated static func encodeSearchContinuation(
+    _ continuation: SearchContinuation
+  ) throws -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    do {
+      return try encoder.encode(continuation).base64EncodedString()
+    } catch {
+      throw S3ServiceError.service("The object search cursor could not be created.")
+    }
+  }
+
+  private nonisolated static func decodeSearchContinuation(
+    _ token: String
+  ) throws -> SearchContinuation {
+    guard let data = Data(base64Encoded: token),
+      let continuation = try? JSONDecoder().decode(SearchContinuation.self, from: data)
+    else {
+      throw S3ServiceError.service("The object search cursor is invalid.")
+    }
+    return continuation
   }
 
   nonisolated static func recursiveSearchPlan(
@@ -434,6 +694,11 @@ actor CoreWorkbenchService: WorkbenchServing {
     for object in objects where !object.isPrefix {
       try Task.checkCancellation()
       try await context.service.deleteObject(bucket: location.bucket, key: object.key)
+      try? await searchIndex?.removeObject(
+        key: object.key,
+        connectionID: location.connectionID,
+        bucket: location.bucket
+      )
     }
   }
 
@@ -451,6 +716,22 @@ actor CoreWorkbenchService: WorkbenchServing {
       bucket: location.bucket,
       sourceKey: object.key,
       destinationKey: destinationKey
+    )
+    try? await searchIndex?.removeObject(
+      key: object.key,
+      connectionID: location.connectionID,
+      bucket: location.bucket
+    )
+    try? await searchIndex?.upsert(
+      S3Object(
+        key: destinationKey,
+        size: object.size,
+        lastModified: Date(),
+        eTag: nil,
+        storageClass: object.storageClass
+      ),
+      connectionID: location.connectionID,
+      bucket: location.bucket
     )
   }
 
@@ -536,6 +817,18 @@ actor CoreWorkbenchService: WorkbenchServing {
       ) { update in
         progress(update.fractionCompleted)
       }
+      let fileSize = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize
+      try? await searchIndex?.upsert(
+        S3Object(
+          key: destinationKey,
+          size: Int64(fileSize ?? 0),
+          lastModified: Date(),
+          eTag: nil,
+          storageClass: nil
+        ),
+        connectionID: location.connectionID,
+        bucket: location.bucket
+      )
     case .download(let object, let location, let directory, let collisionPolicy):
       let context = try await s3ServiceContext(at: location)
       try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)

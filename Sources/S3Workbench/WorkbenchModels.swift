@@ -229,6 +229,22 @@ struct ObjectSearchPage: Sendable {
   let objects: [ObjectRow]
   let scannedObjectCount: Int
   let continuationToken: String?
+  let indexSnapshot: ObjectIndexSnapshot?
+  let isBuildingIndex: Bool
+
+  init(
+    objects: [ObjectRow],
+    scannedObjectCount: Int,
+    continuationToken: String?,
+    indexSnapshot: ObjectIndexSnapshot? = nil,
+    isBuildingIndex: Bool = false
+  ) {
+    self.objects = objects
+    self.scannedObjectCount = scannedObjectCount
+    self.continuationToken = continuationToken
+    self.indexSnapshot = indexSnapshot
+    self.isBuildingIndex = isBuildingIndex
+  }
 }
 
 struct ObjectDetails: Sendable {
@@ -302,8 +318,9 @@ protocol WorkbenchServing: Sendable {
   func listObjects(at location: ObjectLocation, continuationToken: String?) async throws
     -> ObjectPage
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
   ) async throws -> ObjectSearchPage
+  func cancelObjectSearch(at location: ObjectLocation) async
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails
   func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws
   func download(
@@ -355,8 +372,9 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
     -> ObjectPage
   { throw WorkbenchUIError.serviceUnavailable }
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
   ) async throws -> ObjectSearchPage { throw WorkbenchUIError.serviceUnavailable }
+  func cancelObjectSearch(at location: ObjectLocation) async {}
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {
     throw WorkbenchUIError.serviceUnavailable
   }

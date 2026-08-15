@@ -539,6 +539,249 @@ import Testing
   }
 }
 
+@Test func recursiveSearchBuildsAndReusesAnAtomicIndexWithoutAnotherS3Scan() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Restricted",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/restricted",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-IndexedSearch-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: "access", secretKey: "secret"), for: connectionID)
+  let index = try ObjectSearchIndex(fileURL: directory.appendingPathComponent("index.sqlite3"))
+  let probe = SearchIndexServiceProbe()
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: index,
+    credentialStore: credentials,
+    s3ServiceFactory: { _, _ in
+      EmptyS3Service(listObjectsHandler: { bucket, prefix, delimiter, token, pageSize in
+        try await probe.page(
+          bucket: bucket,
+          prefix: prefix,
+          delimiter: delimiter,
+          continuationToken: token,
+          pageSize: pageSize
+        )
+      })
+    }
+  )
+  let location = ObjectLocation(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+  let scope = ObjectIndexScope(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+
+  var continuationToken: String?
+  var firstMatches: [ObjectRow] = []
+  var scannedObjectCount = 0
+  var completedSnapshot: ObjectIndexSnapshot?
+  repeat {
+    let page = try await service.searchObjects(
+      at: location,
+      query: "needle",
+      continuationToken: continuationToken,
+      refreshIndex: false
+    )
+    firstMatches.append(contentsOf: page.objects)
+    scannedObjectCount += page.scannedObjectCount
+    completedSnapshot = page.indexSnapshot ?? completedSnapshot
+    continuationToken = page.continuationToken
+  } while continuationToken != nil
+
+  let initialCalls = await probe.calls
+  #expect(initialCalls.count == 2)
+  #expect(initialCalls.allSatisfy { $0.prefix == "restricted/" })
+  #expect(initialCalls.allSatisfy { $0.delimiter == nil && $0.pageSize == 1_000 })
+  #expect(firstMatches.map(\.key) == [
+    "restricted/alpha/needle.txt", "restricted/beta/Needle.json",
+  ])
+  #expect(scannedObjectCount == 4)
+  #expect(completedSnapshot?.objectCount == 4)
+
+  let indexedPage = try await service.searchObjects(
+    at: location,
+    query: "archive",
+    continuationToken: nil,
+    refreshIndex: false
+  )
+
+  #expect(indexedPage.objects.map(\.key) == ["restricted/archive.zip"])
+  #expect(indexedPage.scannedObjectCount == 0)
+  #expect(searchSnapshotsMatch(indexedPage.indexSnapshot, completedSnapshot))
+  #expect(await probe.calls.count == initialCalls.count)
+
+  let refreshPage = try await service.searchObjects(
+    at: location,
+    query: "needle",
+    continuationToken: nil,
+    refreshIndex: true
+  )
+  #expect(refreshPage.continuationToken != nil)
+  #expect(await probe.calls.count == initialCalls.count + 1)
+
+  await service.cancelObjectSearch(at: location)
+  #expect(searchSnapshotsMatch(try await index.snapshot(for: scope), completedSnapshot))
+
+  let pageAfterCancellation = try await service.searchObjects(
+    at: location,
+    query: "archive",
+    continuationToken: nil,
+    refreshIndex: false
+  )
+  #expect(pageAfterCancellation.objects.map(\.key) == ["restricted/archive.zip"])
+  #expect(searchSnapshotsMatch(pageAfterCancellation.indexSnapshot, completedSnapshot))
+  #expect(await probe.calls.count == initialCalls.count + 1)
+}
+
+@Test func pathQualifiedSearchPushesTheExactDirectoryIntoTheS3Request() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Restricted",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/restricted",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-PathSearch-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: "access", secretKey: "secret"), for: connectionID)
+  let probe = SearchIndexServiceProbe()
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: try ObjectSearchIndex(
+      fileURL: directory.appendingPathComponent("index.sqlite3")),
+    credentialStore: credentials,
+    s3ServiceFactory: { _, _ in
+      EmptyS3Service(listObjectsHandler: { bucket, prefix, delimiter, token, pageSize in
+        try await probe.page(
+          bucket: bucket,
+          prefix: prefix,
+          delimiter: delimiter,
+          continuationToken: token,
+          pageSize: pageSize
+        )
+      })
+    }
+  )
+  let location = ObjectLocation(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+
+  _ = try await service.searchObjects(
+    at: location,
+    query: "folder//sub/needle",
+    continuationToken: nil,
+    refreshIndex: false
+  )
+
+  let call = try #require(await probe.calls.first)
+  #expect(call.bucket == "bucket")
+  #expect(call.prefix == "restricted/folder//sub/")
+  #expect(call.delimiter == nil)
+  #expect(call.pageSize == 1_000)
+}
+
+@Test func minIORecursiveSearchIndexesEveryPageThenAvoidsAnotherRemoteListing() async throws {
+  let environment = ProcessInfo.processInfo.environment
+  guard environment["S3_INTEGRATION_TESTS"] == "1" else { return }
+  guard let endpointValue = environment["S3_TEST_ENDPOINT"],
+    let endpoint = URL(string: endpointValue),
+    let accessKey = environment["S3_TEST_ACCESS_KEY"],
+    let secretKey = environment["S3_TEST_SECRET_KEY"],
+    let bucket = environment["S3_TEST_BUCKET"]
+  else {
+    throw S3ServiceError.invalidConfiguration("S3 integration environment is incomplete.")
+  }
+
+  let connectionID = UUID()
+  let profile = try ConnectionProfile(
+    id: connectionID,
+    name: "Indexed MinIO search",
+    endpoint: endpoint,
+    accessPath: "/\(bucket)/recursive-search/",
+    region: environment["S3_TEST_REGION"] ?? "us-east-1",
+    addressingStyle: .path
+  ).validated()
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-MinIOIndex-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: accessKey, secretKey: secretKey), for: connectionID)
+  let counter = SearchRequestCounter()
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: try ObjectSearchIndex(
+      fileURL: directory.appendingPathComponent("index.sqlite3")),
+    credentialStore: credentials,
+    s3ServiceFactory: { profile, credentials in
+      let liveService = try AWSS3Service(profile: profile, credentials: credentials)
+      return EmptyS3Service(
+        listObjectsHandler: { bucket, prefix, delimiter, token, pageSize in
+          await counter.record()
+          return try await liveService.listObjects(
+            bucket: bucket,
+            prefix: prefix,
+            delimiter: delimiter,
+            continuationToken: token,
+            pageSize: pageSize
+          )
+        })
+    }
+  )
+  let location = ObjectLocation(
+    connectionID: connectionID, bucket: bucket, prefix: "recursive-search/")
+
+  var continuationToken: String?
+  var matches: [ObjectRow] = []
+  var scannedObjectCount = 0
+  var snapshot: ObjectIndexSnapshot?
+  repeat {
+    let page = try await service.searchObjects(
+      at: location,
+      query: "needle",
+      continuationToken: continuationToken,
+      refreshIndex: false
+    )
+    matches.append(contentsOf: page.objects)
+    scannedObjectCount += page.scannedObjectCount
+    snapshot = page.indexSnapshot ?? snapshot
+    continuationToken = page.continuationToken
+  } while continuationToken != nil
+
+  #expect(await counter.count == 2)
+  #expect(scannedObjectCount == 1_005)
+  #expect(matches.map(\.key) == ["recursive-search/nested/object-1004-needle.txt"])
+  #expect(snapshot?.objectCount == 1_005)
+
+  let indexedPage = try await service.searchObjects(
+    at: location,
+    query: "object-0001",
+    continuationToken: nil,
+    refreshIndex: false
+  )
+  #expect(indexedPage.objects.map(\.key) == ["recursive-search/nested/object-0001.txt"])
+  #expect(indexedPage.scannedObjectCount == 0)
+  #expect(await counter.count == 2)
+}
+
 @MainActor
 @Test func recursiveSearchFollowsEveryPageWithinTheCurrentAccessRoot() async throws {
   let connectionID = UUID()
@@ -574,6 +817,30 @@ import Testing
   #expect(model.searchMatchCount == 2)
   #expect(!model.isSearching)
   #expect(!model.isSearchLoadingIndicatorVisible)
+}
+
+@MainActor
+@Test func refreshingTheSearchIndexOnlyMarksTheFirstPageAsForced() async throws {
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty)
+  ) { _, _, token in
+    ObjectSearchPage(
+      objects: [],
+      scannedObjectCount: 1,
+      continuationToken: token == nil ? "next" : nil
+    )
+  }
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.searchQuery = "needle"
+
+  await model.startSearch()
+  await model.refreshSearchIndex()
+
+  let calls = await service.searchCalls
+  #expect(calls.map(\.refreshIndex) == [false, false, true, false])
 }
 
 @MainActor
@@ -751,6 +1018,35 @@ import Testing
   #expect(model.searchScannedObjectCount == 1_001)
   #expect(model.searchErrorMessage == nil)
   #expect(!model.isSearching)
+}
+
+@MainActor
+@Test func retrySearchRestartsAnInterruptedIndexBuildFromItsFirstPage() async {
+  let first = searchObject(id: "first", key: "first.txt")
+  let second = searchObject(id: "second", key: "second.txt")
+  let probe = SearchIndexRetryProbe(first: first, second: second)
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty)
+  ) { _, _, token in
+    try await probe.page(continuationToken: token)
+  }
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.searchQuery = "txt"
+
+  await model.startSearch()
+  #expect(model.isBuildingSearchIndex)
+  #expect(model.objects.map(\.id) == ["first"])
+
+  await model.retrySearch()
+
+  #expect((await service.searchCalls).map(\.continuationToken) == [nil, "next", nil, "next"])
+  #expect(model.objects.map(\.id) == ["first", "second"])
+  #expect(model.searchScannedObjectCount == 1_001)
+  #expect(!model.isBuildingSearchIndex)
+  #expect(model.searchErrorMessage == nil)
 }
 
 @MainActor
@@ -975,6 +1271,7 @@ private struct SearchCall: Equatable, Sendable {
   let location: ObjectLocation
   let query: String
   let continuationToken: String?
+  let refreshIndex: Bool
 }
 
 private typealias SearchHandler = @Sendable (
@@ -1038,15 +1335,21 @@ private actor StubWorkbenchService: WorkbenchServing {
     return try listObjectsResult.get()
   }
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
   ) async throws -> ObjectSearchPage {
     searchCalls.append(
-      SearchCall(location: location, query: query, continuationToken: continuationToken))
+      SearchCall(
+        location: location,
+        query: query,
+        continuationToken: continuationToken,
+        refreshIndex: refreshIndex
+      ))
     guard let searchHandler else {
       throw S3ServiceError.unsupported("Not used by this test.")
     }
     return try await searchHandler(location, query, continuationToken)
   }
+  func cancelObjectSearch(at location: ObjectLocation) async {}
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws
     -> ObjectDetails
   { throw S3ServiceError.unsupported("Not used by this test.") }
@@ -1099,6 +1402,33 @@ private actor SearchRetryProbe {
     guard continuationToken != nil else {
       return ObjectSearchPage(
         objects: [first], scannedObjectCount: 1_000, continuationToken: "next")
+    }
+    if !failed {
+      failed = true
+      throw S3ServiceError.networkUnavailable
+    }
+    return ObjectSearchPage(objects: [second], scannedObjectCount: 1, continuationToken: nil)
+  }
+}
+
+private actor SearchIndexRetryProbe {
+  let first: ObjectRow
+  let second: ObjectRow
+  private var failed = false
+
+  init(first: ObjectRow, second: ObjectRow) {
+    self.first = first
+    self.second = second
+  }
+
+  func page(continuationToken: String?) throws -> ObjectSearchPage {
+    guard continuationToken != nil else {
+      return ObjectSearchPage(
+        objects: [first],
+        scannedObjectCount: 1_000,
+        continuationToken: "next",
+        isBuildingIndex: true
+      )
     }
     if !failed {
       failed = true
@@ -1322,13 +1652,96 @@ private final class InMemoryCredentialStore: CredentialStore, @unchecked Sendabl
   }
 }
 
+private struct SearchIndexListCall: Equatable, Sendable {
+  let bucket: String
+  let prefix: String
+  let delimiter: String?
+  let continuationToken: String?
+  let pageSize: Int
+}
+
+private actor SearchIndexServiceProbe {
+  private(set) var calls: [SearchIndexListCall] = []
+
+  func page(
+    bucket: String,
+    prefix: String,
+    delimiter: String?,
+    continuationToken: String?,
+    pageSize: Int
+  ) throws -> S3ObjectPage {
+    calls.append(
+      SearchIndexListCall(
+        bucket: bucket,
+        prefix: prefix,
+        delimiter: delimiter,
+        continuationToken: continuationToken,
+        pageSize: pageSize
+      ))
+    switch continuationToken {
+    case nil:
+      return S3ObjectPage(
+        prefixes: [],
+        objects: [
+          S3Object(
+            key: "restricted/alpha/needle.txt", size: 1, lastModified: nil,
+            eTag: nil, storageClass: nil),
+          S3Object(
+            key: "restricted/archive.zip", size: 2, lastModified: nil,
+            eTag: nil, storageClass: nil),
+        ],
+        nextContinuationToken: "remote-page-2",
+        keyCount: 2
+      )
+    case "remote-page-2":
+      return S3ObjectPage(
+        prefixes: [],
+        objects: [
+          S3Object(
+            key: "restricted/beta/Needle.json", size: 3, lastModified: nil,
+            eTag: nil, storageClass: nil),
+          S3Object(
+            key: "restricted/other.txt", size: 4, lastModified: nil,
+            eTag: nil, storageClass: nil),
+        ],
+        nextContinuationToken: nil,
+        keyCount: 2
+      )
+    default:
+      throw S3ServiceError.service("Unexpected continuation token.")
+    }
+  }
+}
+
+private actor SearchRequestCounter {
+  private(set) var count = 0
+
+  func record() {
+    count += 1
+  }
+}
+
+private typealias CoreListObjectsHandler = @Sendable (
+  String, String, String?, String?, Int
+) async throws -> S3ObjectPage
+
 private struct EmptyS3Service: S3Service {
+  private let listObjectsHandler: CoreListObjectsHandler?
+
+  init(listObjectsHandler: CoreListObjectsHandler? = nil) {
+    self.listObjectsHandler = listObjectsHandler
+  }
+
   func testConnection() async throws -> ConnectionTestResult { .init(bucketCount: 0) }
   func listBuckets() async throws -> [S3Bucket] { [] }
   func listObjects(
     bucket: String, prefix: String, delimiter: String?, continuationToken: String?, pageSize: Int
   ) async throws -> S3ObjectPage {
-    .init(prefixes: [], objects: [], nextContinuationToken: nil, keyCount: 0)
+    if let listObjectsHandler {
+      return try await listObjectsHandler(
+        bucket, prefix, delimiter, continuationToken, pageSize)
+    }
+    return .init(prefixes: [], objects: [], nextContinuationToken: nil, keyCount: 0)
   }
   func metadata(bucket: String, key: String) async throws -> S3ObjectMetadata {
     throw S3ServiceError.notFound
@@ -1376,6 +1789,16 @@ private func searchObject(id: String, key: String, path: String = "") -> ObjectR
     storageClass: nil,
     isPrefix: false
   )
+}
+
+private func searchSnapshotsMatch(
+  _ lhs: ObjectIndexSnapshot?,
+  _ rhs: ObjectIndexSnapshot?
+) -> Bool {
+  guard let lhs, let rhs else { return lhs == nil && rhs == nil }
+  return lhs.objectCount == rhs.objectCount
+    && lhs.isStale == rhs.isStale
+    && abs(lhs.indexedAt.timeIntervalSince(rhs.indexedAt)) < 0.001
 }
 
 @MainActor
