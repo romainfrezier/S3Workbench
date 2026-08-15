@@ -21,7 +21,8 @@ let package = Package(
                 .product(name: "AWSClientRuntime", package: "aws-sdk-swift"),
                 .product(name: "ClientRuntime", package: "smithy-swift"),
                 .product(name: "SmithySwiftNIO", package: "smithy-swift"),
-            ]
+            ],
+            linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .executableTarget(
             name: "S3Workbench",
