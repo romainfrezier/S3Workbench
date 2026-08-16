@@ -49,6 +49,7 @@ actor CoreWorkbenchService: WorkbenchServing {
     let remoteToken: String?
     let buildID: UUID?
     let localCursor: Int64?
+    let scansScopeRoot: Bool
   }
 
   private struct SearchIndexBuildSession: Sendable {
@@ -123,13 +124,13 @@ actor CoreWorkbenchService: WorkbenchServing {
       throw S3ServiceError.invalidConfiguration("Access key and secret access key are required.")
     }
     do {
+      await abandonSearchIndexBuilds(connectionID: draft.id)
+      try await searchIndex?.remove(connectionID: draft.id)
       if hasAccessKey {
         let credentials = try S3Credentials(accessKey: draft.accessKey, secretKey: draft.secretKey)
         try credentialStore.save(credentials, for: profile.id)
       }
       _ = try await connectionStore.upsert(profile)
-      await abandonSearchIndexBuilds(connectionID: draft.id)
-      try? await searchIndex?.remove(connectionID: draft.id)
     } catch {
       if let previousCredentials {
         try? credentialStore.save(previousCredentials, for: draft.id)
@@ -195,9 +196,9 @@ actor CoreWorkbenchService: WorkbenchServing {
     let credentials = try credentialStore.credentials(for: id)
     try credentialStore.remove(for: id)
     do {
-      _ = try await connectionStore.remove(id: id)
       await abandonSearchIndexBuilds(connectionID: id)
-      try? await searchIndex?.remove(connectionID: id)
+      try await searchIndex?.remove(connectionID: id)
+      _ = try await connectionStore.remove(id: id)
     } catch {
       if let credentials { try? credentialStore.save(credentials, for: id) }
       throw error
@@ -321,9 +322,10 @@ actor CoreWorkbenchService: WorkbenchServing {
           scope: scope,
           location: location,
           plan: plan,
-          listingPrefix: continuation.buildID == nil ? plan.listingPrefix : scope.prefix,
+          listingPrefix: continuation.scansScopeRoot ? scope.prefix : plan.listingPrefix,
           remoteToken: remoteToken,
-          buildID: continuation.buildID
+          buildID: continuation.buildID,
+          scansScopeRoot: continuation.scansScopeRoot
         )
       }
     }
@@ -359,7 +361,8 @@ actor CoreWorkbenchService: WorkbenchServing {
         plan: plan,
         listingPrefix: plan.listingPrefix,
         remoteToken: nil,
-        buildID: nil
+        buildID: nil,
+        scansScopeRoot: false
       )
     }
 
@@ -372,7 +375,8 @@ actor CoreWorkbenchService: WorkbenchServing {
       plan: plan,
       listingPrefix: scope.prefix,
       remoteToken: nil,
-      buildID: buildID
+      buildID: buildID,
+      scansScopeRoot: true
     )
   }
 
@@ -396,7 +400,8 @@ actor CoreWorkbenchService: WorkbenchServing {
           mode: .localIndex,
           remoteToken: nil,
           buildID: nil,
-          localCursor: $0
+          localCursor: $0,
+          scansScopeRoot: false
         )
       )
     }
@@ -422,7 +427,8 @@ actor CoreWorkbenchService: WorkbenchServing {
     plan: RecursiveSearchPlan,
     listingPrefix: String,
     remoteToken: String?,
-    buildID: UUID?
+    buildID: UUID?,
+    scansScopeRoot: Bool
   ) async throws -> ObjectSearchPage {
     let page: S3ObjectPage
     do {
@@ -463,7 +469,8 @@ actor CoreWorkbenchService: WorkbenchServing {
           mode: .remote,
           remoteToken: $0,
           buildID: activeBuildID,
-          localCursor: nil
+          localCursor: nil,
+          scansScopeRoot: scansScopeRoot
         )
       )
     }
@@ -694,11 +701,13 @@ actor CoreWorkbenchService: WorkbenchServing {
     for object in objects where !object.isPrefix {
       try Task.checkCancellation()
       try await context.service.deleteObject(bucket: location.bucket, key: object.key)
-      try? await searchIndex?.removeObject(
-        key: object.key,
-        connectionID: location.connectionID,
-        bucket: location.bucket
-      )
+      await updateSearchIndex(connectionID: location.connectionID) { index in
+        try await index.removeObject(
+          key: object.key,
+          connectionID: location.connectionID,
+          bucket: location.bucket
+        )
+      }
     }
   }
 
@@ -717,22 +726,24 @@ actor CoreWorkbenchService: WorkbenchServing {
       sourceKey: object.key,
       destinationKey: destinationKey
     )
-    try? await searchIndex?.removeObject(
-      key: object.key,
-      connectionID: location.connectionID,
-      bucket: location.bucket
-    )
-    try? await searchIndex?.upsert(
-      S3Object(
-        key: destinationKey,
-        size: object.size,
-        lastModified: Date(),
-        eTag: nil,
-        storageClass: object.storageClass
-      ),
-      connectionID: location.connectionID,
-      bucket: location.bucket
-    )
+    await updateSearchIndex(connectionID: location.connectionID) { index in
+      try await index.removeObject(
+        key: object.key,
+        connectionID: location.connectionID,
+        bucket: location.bucket
+      )
+      try await index.upsert(
+        S3Object(
+          key: destinationKey,
+          size: object.size,
+          lastModified: Date(),
+          eTag: nil,
+          storageClass: object.storageClass
+        ),
+        connectionID: location.connectionID,
+        bucket: location.bucket
+      )
+    }
   }
 
   func presignedURL(
@@ -818,17 +829,19 @@ actor CoreWorkbenchService: WorkbenchServing {
         progress(update.fractionCompleted)
       }
       let fileSize = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize
-      try? await searchIndex?.upsert(
-        S3Object(
-          key: destinationKey,
-          size: Int64(fileSize ?? 0),
-          lastModified: Date(),
-          eTag: nil,
-          storageClass: nil
-        ),
-        connectionID: location.connectionID,
-        bucket: location.bucket
-      )
+      await updateSearchIndex(connectionID: location.connectionID) { index in
+        try await index.upsert(
+          S3Object(
+            key: destinationKey,
+            size: Int64(fileSize ?? 0),
+            lastModified: Date(),
+            eTag: nil,
+            storageClass: nil
+          ),
+          connectionID: location.connectionID,
+          bucket: location.bucket
+        )
+      }
     case .download(let object, let location, let directory, let collisionPolicy):
       let context = try await s3ServiceContext(at: location)
       try Self.validate(key: object.key, bucket: location.bucket, within: context.accessRoot)
@@ -918,6 +931,18 @@ actor CoreWorkbenchService: WorkbenchServing {
     s3ServiceContextLoads[connectionID]?.task.cancel()
     s3ServiceContextLoads[connectionID] = nil
     s3ServiceContextGenerations[connectionID, default: 0] &+= 1
+  }
+
+  private func updateSearchIndex(
+    connectionID: UUID,
+    _ update: @Sendable (ObjectSearchIndex) async throws -> Void
+  ) async {
+    guard let searchIndex else { return }
+    do {
+      try await update(searchIndex)
+    } catch {
+      try? await searchIndex.remove(connectionID: connectionID)
+    }
   }
 
   private func requireRemoteDestinationAvailable(

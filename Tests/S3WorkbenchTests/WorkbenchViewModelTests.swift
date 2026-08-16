@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import S3WorkbenchCore
 import Testing
 @testable import S3Workbench
@@ -693,6 +694,211 @@ import Testing
   #expect(call.prefix == "restricted/folder//sub/")
   #expect(call.delimiter == nil)
   #expect(call.pageSize == 1_000)
+}
+
+@Test func remoteSearchKeepsItsScopePrefixAfterAnIndexBuildIsAbandoned() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Restricted",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/restricted",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-SearchContinuation-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: "access", secretKey: "secret"), for: connectionID)
+  let probe = SearchScopeContinuationProbe()
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: try ObjectSearchIndex(
+      fileURL: directory.appendingPathComponent("index.sqlite3")),
+    credentialStore: credentials,
+    s3ServiceFactory: { _, _ in
+      EmptyS3Service(listObjectsHandler: { bucket, prefix, delimiter, token, pageSize in
+        await probe.page(
+          bucket: bucket,
+          prefix: prefix,
+          delimiter: delimiter,
+          continuationToken: token,
+          pageSize: pageSize
+        )
+      })
+    }
+  )
+  let location = ObjectLocation(
+    connectionID: connectionID,
+    bucket: "bucket",
+    prefix: "restricted/current/"
+  )
+
+  let first = try await service.searchObjects(
+    at: location, query: "needle", continuationToken: nil, refreshIndex: false)
+  guard let firstToken = first.continuationToken else {
+    throw S3ServiceError.service("Expected a second remote search page.")
+  }
+  await service.cancelObjectSearch(at: location)
+  let second = try await service.searchObjects(
+    at: location,
+    query: "needle",
+    continuationToken: firstToken,
+    refreshIndex: false
+  )
+  guard let secondToken = second.continuationToken else {
+    throw S3ServiceError.service("Expected a third remote search page.")
+  }
+  _ = try await service.searchObjects(
+    at: location,
+    query: "needle",
+    continuationToken: secondToken,
+    refreshIndex: false
+  )
+
+  #expect(await probe.calls.map(\.prefix) == ["restricted/", "restricted/", "restricted/"])
+}
+
+@Test func connectionRemovalFailsClosedWhenIndexedKeysCannotBeDeleted() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Restricted",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/restricted",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-IndexCleanup-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let databaseURL = directory.appendingPathComponent("index.sqlite3")
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: "access", secretKey: "secret"), for: connectionID)
+  let index = try ObjectSearchIndex(fileURL: databaseURL)
+  let scope = ObjectIndexScope(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+  let build = try await index.beginRebuild(for: scope)
+  try await index.append(
+    [
+      S3Object(
+        key: "restricted/private.txt", size: 1, lastModified: nil,
+        eTag: nil, storageClass: nil)
+    ], to: build)
+  _ = try await index.finishRebuild(build)
+
+  var database: OpaquePointer?
+  #expect(sqlite3_open(databaseURL.path, &database) == SQLITE_OK)
+  #expect(
+    sqlite3_exec(
+      database,
+      """
+      CREATE TRIGGER fail_scope_delete
+      BEFORE DELETE ON search_scopes
+      BEGIN SELECT RAISE(ABORT, 'cleanup blocked'); END
+      """,
+      nil,
+      nil,
+      nil
+    ) == SQLITE_OK
+  )
+  sqlite3_close_v2(database)
+
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: index,
+    credentialStore: credentials,
+    s3ServiceFactory: { _, _ in EmptyS3Service() }
+  )
+
+  await #expect(throws: (any Error).self) {
+    try await service.removeConnection(id: connectionID)
+  }
+  #expect(try await store.load().map(\.id) == [connectionID])
+  #expect(try credentials.credentials(for: connectionID) != nil)
+  #expect(try await index.snapshot(for: scope)?.objectCount == 1)
+}
+
+@Test func failedIndexMutationInvalidatesTheConnectionCache() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Restricted",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/restricted",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-IndexMutation-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let databaseURL = directory.appendingPathComponent("index.sqlite3")
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: "access", secretKey: "secret"), for: connectionID)
+  let index = try ObjectSearchIndex(fileURL: databaseURL)
+  let scope = ObjectIndexScope(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+  let build = try await index.beginRebuild(for: scope)
+  let source = S3Object(
+    key: "restricted/old.txt", size: 1, lastModified: nil,
+    eTag: nil, storageClass: nil)
+  try await index.append([source], to: build)
+  _ = try await index.finishRebuild(build)
+
+  var database: OpaquePointer?
+  #expect(sqlite3_open(databaseURL.path, &database) == SQLITE_OK)
+  #expect(
+    sqlite3_exec(
+      database,
+      """
+      CREATE TRIGGER fail_index_update
+      BEFORE UPDATE ON search_scopes
+      BEGIN SELECT RAISE(ABORT, 'update blocked'); END
+      """,
+      nil,
+      nil,
+      nil
+    ) == SQLITE_OK
+  )
+  sqlite3_close_v2(database)
+
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: index,
+    credentialStore: credentials,
+    s3ServiceFactory: { _, _ in EmptyS3Service() }
+  )
+  let location = ObjectLocation(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+  let row = ObjectRow(
+    id: ObjectRow.id(for: source.key, isPrefix: false),
+    key: source.key,
+    displayName: "old.txt",
+    relativePath: "",
+    size: source.size,
+    modifiedAt: source.lastModified,
+    storageClass: source.storageClass,
+    isPrefix: false
+  )
+
+  try await service.move(
+    object: row,
+    from: location,
+    toKey: "restricted/new.txt",
+    collisionPolicy: .replace
+  )
+
+  #expect(try await index.snapshot(for: scope) == nil)
 }
 
 @Test func minIORecursiveSearchIndexesEveryPageThenAvoidsAnotherRemoteListing() async throws {
@@ -1710,6 +1916,35 @@ private actor SearchIndexServiceProbe {
     default:
       throw S3ServiceError.service("Unexpected continuation token.")
     }
+  }
+}
+
+private actor SearchScopeContinuationProbe {
+  private(set) var calls: [SearchIndexListCall] = []
+
+  func page(
+    bucket: String,
+    prefix: String,
+    delimiter: String?,
+    continuationToken: String?,
+    pageSize: Int
+  ) -> S3ObjectPage {
+    calls.append(
+      SearchIndexListCall(
+        bucket: bucket,
+        prefix: prefix,
+        delimiter: delimiter,
+        continuationToken: continuationToken,
+        pageSize: pageSize
+      ))
+    let nextToken: String?
+    switch continuationToken {
+    case nil: nextToken = "remote-page-2"
+    case "remote-page-2": nextToken = "remote-page-3"
+    default: nextToken = nil
+    }
+    return S3ObjectPage(
+      prefixes: [], objects: [], nextContinuationToken: nextToken, keyCount: 0)
   }
 }
 
