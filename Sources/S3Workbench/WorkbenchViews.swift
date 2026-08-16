@@ -516,6 +516,15 @@ private struct ObjectBrowserView: View {
         Task { await model.previewSelected() }
       }
     }
+    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+      geometry.contentSize.height - geometry.visibleRect.maxY
+    } action: { _, distanceFromBottom in
+      guard distanceFromBottom < 200, !model.isSearchMode,
+        model.continuationToken != nil, !model.isLoadingMore,
+        model.paginationErrorMessage == nil
+      else { return }
+      Task { await model.loadMore() }
+    }
     .overlay {
       if model.isSearching, model.objects.isEmpty {
         if model.isSearchLoadingIndicatorVisible {
@@ -634,19 +643,10 @@ private struct ObjectBrowserView: View {
           message: error,
           secondaryMessage: model.paginationErrorSecondaryMessage
         ) { Task { await model.loadMore() } }
-      } else if !model.isSearchMode, model.continuationToken != nil {
-        Button { Task { await model.loadMore() } } label: {
-          HStack(spacing: 8) {
-            if model.isPaginationLoadingIndicatorVisible {
-              ProgressView().controlSize(.small)
-            }
-            Text(model.isPaginationLoadingIndicatorVisible ? "Loading…" : "Load More")
-          }
-        }
-          .disabled(model.isLoadingMore)
-          .padding(8)
-          .frame(maxWidth: .infinity)
-          .background(.bar)
+      } else if !model.isSearchMode, model.isLoadingMore,
+        model.isPaginationLoadingIndicatorVisible
+      {
+        RefreshProgressBanner(title: "Loading more objects…")
       }
     }
     .navigationTitle(model.selectedBucket ?? "Objects")
