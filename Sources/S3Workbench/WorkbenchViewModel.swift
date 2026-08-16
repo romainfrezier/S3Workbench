@@ -16,6 +16,8 @@ final class WorkbenchViewModel {
   var searchQuery = ""
   private(set) var activeSearchQuery: String?
   private(set) var searchScannedObjectCount = 0
+  private(set) var searchIndexSnapshot: ObjectIndexSnapshot?
+  private(set) var isBuildingSearchIndex = false
   private(set) var searchErrorMessage: String?
   private(set) var searchErrorSecondaryMessage: String?
   private(set) var searchWasCancelled = false
@@ -56,6 +58,7 @@ final class WorkbenchViewModel {
   private var replacesSearchResultsOnNextPage = false
   private var pendingSearchObjects: [ObjectRow] = []
   private var pendingSearchScannedObjectCount = 0
+  private var pendingSearchIndexSnapshot: ObjectIndexSnapshot?
   private var visibleLoadingIndicators = Set<LoadingIndicator>()
   @ObservationIgnored private var loadingIndicatorTasks: [LoadingIndicator: Task<Void, Never>] = [:]
   @ObservationIgnored private var loadingIndicatorIDs: [LoadingIndicator: UUID] = [:]
@@ -271,6 +274,14 @@ final class WorkbenchViewModel {
   }
 
   func startSearch() async {
+    await startSearch(refreshIndex: false)
+  }
+
+  func refreshSearchIndex() async {
+    await startSearch(refreshIndex: true)
+  }
+
+  private func startSearch(refreshIndex: Bool) async {
     let query = searchQuery
     guard !query.isEmpty, let location else {
       if isSearchMode { await reloadObjects(clearSearchQuery: false) }
@@ -280,8 +291,14 @@ final class WorkbenchViewModel {
     let refreshesCurrentSearch = activeSearchContext?.location == location
       && activeSearchQuery?.utf8.elementsEqual(query.utf8) == true
     let previousScannedObjectCount = searchScannedObjectCount
+    let previousIndexSnapshot = searchIndexSnapshot
     resetSearch(clearQuery: false)
-    let context = ObjectSearchContext(id: UUID(), location: location, query: query)
+    let context = ObjectSearchContext(
+      id: UUID(),
+      location: location,
+      query: query,
+      refreshIndex: refreshIndex
+    )
     activeSearchContext = context
     activeSearchQuery = query
     if !refreshesCurrentSearch { objects = [] }
@@ -293,12 +310,14 @@ final class WorkbenchViewModel {
     paginationErrorMessage = nil
     paginationErrorSecondaryMessage = nil
     searchScannedObjectCount = refreshesCurrentSearch ? previousScannedObjectCount : 0
+    searchIndexSnapshot = refreshesCurrentSearch ? previousIndexSnapshot : nil
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
     replacesSearchResultsOnNextPage = refreshesCurrentSearch
     pendingSearchObjects = []
     pendingSearchScannedObjectCount = 0
+    pendingSearchIndexSnapshot = nil
     isSearching = true
     startLoadingIndicator(.search, id: context.id)
 
@@ -319,7 +338,7 @@ final class WorkbenchViewModel {
 
   func cancelSearch() {
     guard isSearching else { return }
-    searchTask?.cancel()
+    cancelRunningSearch()
     isSearching = false
     searchWasCancelled = true
     if let context = activeSearchContext {
@@ -332,8 +351,21 @@ final class WorkbenchViewModel {
       location == context.location, searchQuery.utf8.elementsEqual(context.query.utf8),
       searchErrorMessage != nil || searchWasCancelled
     else { return }
+    if isBuildingSearchIndex {
+      nextSearchContinuationToken = nil
+      seenSearchContinuationTokens = []
+      replacesSearchResultsOnNextPage = true
+      pendingSearchObjects = []
+      pendingSearchScannedObjectCount = 0
+      pendingSearchIndexSnapshot = nil
+      isBuildingSearchIndex = false
+    }
     let retryContext = ObjectSearchContext(
-      id: UUID(), location: context.location, query: context.query)
+      id: UUID(),
+      location: context.location,
+      query: context.query,
+      refreshIndex: context.refreshIndex
+    )
     activeSearchContext = retryContext
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
@@ -553,7 +585,8 @@ final class WorkbenchViewModel {
         let page = try await service.searchObjects(
           at: context.location,
           query: context.query,
-          continuationToken: nextSearchContinuationToken
+          continuationToken: nextSearchContinuationToken,
+          refreshIndex: context.refreshIndex && nextSearchContinuationToken == nil
         )
         try Task.checkCancellation()
         guard isActive(context), isSearching else {
@@ -569,11 +602,14 @@ final class WorkbenchViewModel {
         if replacesSearchResultsOnNextPage {
           pendingSearchObjects.append(contentsOf: page.objects)
           pendingSearchScannedObjectCount += page.scannedObjectCount
+          if let snapshot = page.indexSnapshot { pendingSearchIndexSnapshot = snapshot }
         } else {
           objects.append(contentsOf: page.objects)
           searchScannedObjectCount += page.scannedObjectCount
+          if let snapshot = page.indexSnapshot { searchIndexSnapshot = snapshot }
         }
         nextSearchContinuationToken = page.continuationToken
+        isBuildingSearchIndex = page.isBuildingIndex
       } while nextSearchContinuationToken != nil
 
       guard isActive(context) else {
@@ -583,11 +619,14 @@ final class WorkbenchViewModel {
       if replacesSearchResultsOnNextPage {
         objects = pendingSearchObjects
         searchScannedObjectCount = pendingSearchScannedObjectCount
+        searchIndexSnapshot = pendingSearchIndexSnapshot
         replacesSearchResultsOnNextPage = false
         pendingSearchObjects = []
         pendingSearchScannedObjectCount = 0
+        pendingSearchIndexSnapshot = nil
       }
       isSearching = false
+      isBuildingSearchIndex = false
       searchTask = nil
       stopLoadingIndicator(.search, id: context.id)
     } catch {
@@ -595,6 +634,7 @@ final class WorkbenchViewModel {
         discardStaleSearch(context)
         return
       }
+      await service.cancelObjectSearch(at: context.location)
       isSearching = false
       searchTask = nil
       stopLoadingIndicator(.search, id: context.id)
@@ -619,10 +659,12 @@ final class WorkbenchViewModel {
     activeSearchContext = nil
     activeSearchQuery = nil
     isSearching = false
+    isBuildingSearchIndex = false
     objects = []
     selectedObjectIDs = []
     objectDetails = nil
     searchScannedObjectCount = 0
+    searchIndexSnapshot = nil
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
@@ -631,18 +673,21 @@ final class WorkbenchViewModel {
     replacesSearchResultsOnNextPage = false
     pendingSearchObjects = []
     pendingSearchScannedObjectCount = 0
+    pendingSearchIndexSnapshot = nil
   }
 
   private func resetSearch(clearQuery: Bool) {
     if let context = activeSearchContext {
       stopLoadingIndicator(.search, id: context.id)
     }
-    searchTask?.cancel()
+    cancelRunningSearch()
     searchTask = nil
     activeSearchContext = nil
     activeSearchQuery = nil
     isSearching = false
+    isBuildingSearchIndex = false
     searchScannedObjectCount = 0
+    searchIndexSnapshot = nil
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
@@ -651,7 +696,16 @@ final class WorkbenchViewModel {
     replacesSearchResultsOnNextPage = false
     pendingSearchObjects = []
     pendingSearchScannedObjectCount = 0
+    pendingSearchIndexSnapshot = nil
     if clearQuery { searchQuery = "" }
+  }
+
+  private func cancelRunningSearch() {
+    guard let searchTask else { return }
+    searchTask.cancel()
+    if let location = activeSearchContext?.location {
+      Task { await service.cancelObjectSearch(at: location) }
+    }
   }
 
   private func parentPrefix(of key: String) -> String {
@@ -739,9 +793,11 @@ private struct ObjectSearchContext: Equatable {
   let id: UUID
   let location: ObjectLocation
   let query: String
+  let refreshIndex: Bool
 
   static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.id == rhs.id && lhs.location == rhs.location
       && lhs.query.utf8.elementsEqual(rhs.query.utf8)
+      && lhs.refreshIndex == rhs.refreshIndex
   }
 }

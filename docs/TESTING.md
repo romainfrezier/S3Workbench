@@ -24,6 +24,7 @@ The integration suite covers:
 
 - authentication and bucket listing;
 - prefix navigation and opaque ListObjectsV2 continuation-token pagination;
+- recursive search across more than 1,000 objects, atomic local-index publication, and a second indexed query with no additional S3 listing request;
 - upload, streaming download, copy/move, and delete;
 - spaces, Unicode, and reserved characters in object keys;
 - presigned GET URLs;

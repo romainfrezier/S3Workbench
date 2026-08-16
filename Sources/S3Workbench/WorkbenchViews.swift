@@ -594,7 +594,11 @@ private struct ObjectBrowserView: View {
             Text("Nothing here. Impressively lightweight.")
           }
         } actions: {
-          if !model.isSearchMode { Button("Upload Files") { requestUpload() } }
+          if model.isSearchMode, model.searchIndexSnapshot != nil {
+            Button("Refresh Index") { Task { await model.refreshSearchIndex() } }
+          } else if !model.isSearchMode {
+            Button("Upload Files") { requestUpload() }
+          }
         }
       }
     }
@@ -666,12 +670,27 @@ private struct SearchStatusBar: View {
     HStack(spacing: 8) {
       if model.isSearchLoadingIndicatorVisible { ProgressView().controlSize(.small) }
       VStack(alignment: .leading, spacing: 2) {
-        Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
-          .font(.callout)
-          .accessibilityLabel(
-            "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
-          )
-          .accessibilityAddTraits(.updatesFrequently)
+        if let snapshot = model.searchIndexSnapshot {
+          Text("\(snapshot.objectCount) indexed · \(model.searchMatchCount) matches")
+            .font(.callout)
+            .accessibilityLabel(
+              "Indexed \(snapshot.objectCount) objects, found \(model.searchMatchCount) matches"
+            )
+            .accessibilityAddTraits(.updatesFrequently)
+          HStack(spacing: 4) {
+            Text(snapshot.isStale ? "Index may be stale · Updated" : "Index updated")
+            Text(snapshot.indexedAt, style: .relative)
+          }
+          .font(.caption)
+          .foregroundStyle(snapshot.isStale ? .orange : .secondary)
+        } else {
+          Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
+            .font(.callout)
+            .accessibilityLabel(
+              "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
+            )
+            .accessibilityAddTraits(.updatesFrequently)
+        }
         if model.searchWasCancelled {
           Text("Search cancelled. The objects remain mysterious.")
             .font(.caption)
@@ -685,6 +704,9 @@ private struct SearchStatusBar: View {
           .keyboardShortcut(.cancelAction)
       } else if model.searchWasCancelled {
         Button("Retry") { Task { await model.retrySearch() } }
+      } else if model.searchIndexSnapshot != nil {
+        Button("Refresh Index") { Task { await model.refreshSearchIndex() } }
+          .help("Rescan the accessible S3 prefix and replace the local index")
       }
     }
     .padding(.horizontal, 12)
@@ -697,13 +719,22 @@ private struct SearchCountLabel: View {
   @Bindable var model: WorkbenchViewModel
 
   var body: some View {
-    Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      .accessibilityLabel(
-        "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
-      )
-      .accessibilityAddTraits(.updatesFrequently)
+    Group {
+      if let snapshot = model.searchIndexSnapshot {
+        Text("\(snapshot.objectCount) indexed · \(model.searchMatchCount) matches")
+          .accessibilityLabel(
+            "Indexed \(snapshot.objectCount) objects, found \(model.searchMatchCount) matches"
+          )
+      } else {
+        Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
+          .accessibilityLabel(
+            "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
+          )
+      }
+    }
+    .font(.caption)
+    .foregroundStyle(.secondary)
+    .accessibilityAddTraits(.updatesFrequently)
   }
 }
 
