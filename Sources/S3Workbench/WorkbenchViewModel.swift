@@ -50,6 +50,7 @@ final class WorkbenchViewModel {
   private var objectLoadGeneration = UUID()
   private var activeSearchContext: ObjectSearchContext?
   private var searchTask: Task<Void, Never>?
+  private var seenObjectContinuationTokens = Set<String>()
   private var nextSearchContinuationToken: String?
   private var seenSearchContinuationTokens = Set<String>()
   private var replacesSearchResultsOnNextPage = false
@@ -233,6 +234,7 @@ final class WorkbenchViewModel {
     objectLoadGeneration = generation
     invalidateLoadingIndicator(.pagination)
     isLoadingMore = false
+    seenObjectContinuationTokens = []
     guard let location else { return nil }
     let context = ObjectLoadContext(location: location)
     let previousContinuationToken = loadedObjectContext == context ? continuationToken : nil
@@ -357,14 +359,9 @@ final class WorkbenchViewModel {
       objectLoadGeneration == generation,
       location == expectedLocation
     else { return }
-    var seenTokens = Set<String>()
     while !objects.contains(where: { candidateIDs.contains($0.id) }),
-      let token = continuationToken
+      continuationToken != nil
     {
-      guard seenTokens.insert(token).inserted else {
-        reportRepeatedPaginationToken()
-        break
-      }
       guard await loadMore(), objectLoadGeneration == generation,
         location == expectedLocation
       else { return }
@@ -377,6 +374,10 @@ final class WorkbenchViewModel {
   @discardableResult
   func loadMore() async -> Bool {
     guard !isSearchMode, let location, let continuationToken, !isLoadingMore else {
+      return false
+    }
+    guard seenObjectContinuationTokens.insert(continuationToken).inserted else {
+      reportRepeatedPaginationToken()
       return false
     }
     let generation = objectLoadGeneration
@@ -399,20 +400,10 @@ final class WorkbenchViewModel {
       guard objectLoadGeneration == generation, self.location == location, !isSearchMode else {
         return false
       }
+      seenObjectContinuationTokens.remove(continuationToken)
       paginationErrorMessage = error.localizedDescription
       paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
       return false
-    }
-  }
-
-  func loadRemainingObjects() async {
-    var seenTokens = Set<String>()
-    while let token = continuationToken {
-      guard seenTokens.insert(token).inserted else {
-        reportRepeatedPaginationToken()
-        return
-      }
-      guard await loadMore() else { return }
     }
   }
 

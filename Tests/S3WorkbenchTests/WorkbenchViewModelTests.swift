@@ -107,7 +107,7 @@ import Testing
 }
 
 @MainActor
-@Test func loadingRemainingPagesPreservesSelectionAndCompletesTheSnapshot() async {
+@Test func loadingMorePreservesSelection() async {
   let first = searchObject(id: "first", key: "first.txt")
   let second = searchObject(id: "second", key: "second.txt")
   let third = searchObject(id: "third", key: "third.txt")
@@ -129,16 +129,16 @@ import Testing
 
   await model.reloadObjects()
   model.select(first)
-  await model.loadRemainingObjects()
+  await model.loadMore()
 
-  #expect(model.objects == [first, second, third])
+  #expect(model.objects == [first, second])
   #expect(model.selectedObjectIDs == [first.id])
-  #expect(model.continuationToken == nil)
+  #expect(model.continuationToken == "page-3")
   #expect(!model.isLoadingMore)
 }
 
 @MainActor
-@Test func loadingRemainingPagesStopsWhenAProviderCyclesPaginationTokens() async {
+@Test func loadingMoreStopsWhenAProviderCyclesPaginationTokens() async {
   let probe = RevealCycleProbe()
   let service = StubWorkbenchService(
     connections: [],
@@ -150,7 +150,9 @@ import Testing
   model.selectedBucket = "bucket"
 
   await model.reloadObjects()
-  await model.loadRemainingObjects()
+  await model.loadMore()
+  await model.loadMore()
+  await model.loadMore()
 
   #expect(await probe.callCount == 3)
   #expect(model.paginationErrorMessage == "The server returned a repeated object pagination token.")

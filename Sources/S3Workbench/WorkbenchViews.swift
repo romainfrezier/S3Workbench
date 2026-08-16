@@ -519,19 +519,11 @@ private struct ObjectBrowserView: View {
     .onScrollGeometryChange(for: CGFloat.self) { geometry in
       geometry.contentSize.height - geometry.visibleRect.maxY
     } action: { _, distanceFromBottom in
-      guard distanceFromBottom < 200, sortOrder.isEmpty, !model.isSearchMode,
+      guard distanceFromBottom < 200, !model.isSearchMode,
         model.continuationToken != nil, !model.isLoadingMore,
         model.paginationErrorMessage == nil
       else { return }
       Task { await model.loadMore() }
-    }
-    .onChange(of: sortOrder.isEmpty) { _, isEmpty in
-      guard !isEmpty else { return }
-      Task { await model.loadRemainingObjects() }
-    }
-    .onChange(of: model.continuationToken) { _, continuationToken in
-      guard !sortOrder.isEmpty, continuationToken != nil else { return }
-      Task { await model.loadRemainingObjects() }
     }
     .overlay {
       if model.isSearching, model.objects.isEmpty {
@@ -646,20 +638,11 @@ private struct ObjectBrowserView: View {
         RefreshErrorBanner(
           message: error,
           secondaryMessage: model.paginationErrorSecondaryMessage
-        ) {
-          Task {
-            if sortOrder.isEmpty {
-              await model.loadMore()
-            } else {
-              await model.loadRemainingObjects()
-            }
-          }
-        }
+        ) { Task { await model.loadMore() } }
       } else if !model.isSearchMode, model.isLoadingMore,
         model.isPaginationLoadingIndicatorVisible
       {
-        RefreshProgressBanner(
-          title: sortOrder.isEmpty ? "Loading more objects…" : "Loading all objects to sort…")
+        RefreshProgressBanner(title: "Loading more objects…")
       }
     }
     .navigationTitle(model.selectedBucket ?? "Objects")
