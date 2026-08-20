@@ -38,7 +38,7 @@ struct ConnectionRow: Identifiable, Hashable, Sendable {
   var color: Color { Color(connectionHex: colorHex) }
 }
 
-struct ConnectionDraft: Identifiable, Sendable {
+struct ConnectionDraft: Identifiable, Equatable, Sendable {
   var id = UUID()
   var isExisting = false
   var name = ""
@@ -257,6 +257,15 @@ struct ObjectDetails: Sendable {
   let headers: [String: String]
 }
 
+struct ConnectionIndexSummary: Identifiable, Equatable, Sendable {
+  var id: UUID { connectionID }
+  let connectionID: UUID
+  let scopeCount: Int
+  let objectCount: Int
+  let indexedAt: Date?
+  let isStale: Bool
+}
+
 enum TransferState: String, Sendable {
   case queued = "Queued"
   case running = "Transferring"
@@ -334,10 +343,22 @@ protocol WorkbenchServing: Sendable {
   ) async throws
   func presignedURL(for object: ObjectRow, at location: ObjectLocation, expiresIn: Duration)
     async throws -> URL
+  func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL
+  func searchIndexSummaries() async throws -> [ConnectionIndexSummary]
+  func clearSearchIndex(connectionID: UUID) async throws
   func downloadForPreview(object: ObjectRow, at location: ObjectLocation) async throws -> URL
   func transfers() async -> [TransferRow]
   func cancelTransfer(id: UUID) async
   func retryTransfer(id: UUID) async
+}
+
+extension WorkbenchServing {
+  func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL {
+    throw WorkbenchUIError.serviceUnavailable
+  }
+
+  func searchIndexSummaries() async throws -> [ConnectionIndexSummary] { [] }
+  func clearSearchIndex(connectionID: UUID) async throws {}
 }
 
 actor PlaceholderWorkbenchService: WorkbenchServing {
@@ -398,6 +419,11 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
   func presignedURL(for object: ObjectRow, at location: ObjectLocation, expiresIn: Duration)
     async throws -> URL
   { throw WorkbenchUIError.serviceUnavailable }
+  func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL {
+    throw WorkbenchUIError.serviceUnavailable
+  }
+  func searchIndexSummaries() async throws -> [ConnectionIndexSummary] { [] }
+  func clearSearchIndex(connectionID: UUID) async throws {}
   func downloadForPreview(object: ObjectRow, at location: ObjectLocation) async throws -> URL {
     throw WorkbenchUIError.serviceUnavailable
   }

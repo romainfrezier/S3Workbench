@@ -158,6 +158,41 @@ import Testing
     #expect(try await index.snapshot(for: fixture.scope) == nil)
 }
 
+@Test func objectSearchIndexSummarizesAndClearsOnlyOneConnection() async throws {
+    let fixture = try SearchIndexFixture()
+    defer { fixture.cleanup() }
+    let index = try ObjectSearchIndex(fileURL: fixture.databaseURL)
+    let secondConnectionID = UUID()
+    let secondScope = ObjectIndexScope(
+        connectionID: secondConnectionID,
+        bucket: "other-bucket",
+        prefix: ""
+    )
+
+    let firstBuild = try await index.beginRebuild(for: fixture.scope)
+    try await index.append(
+        [indexedObject("restricted/one.txt"), indexedObject("restricted/two.txt")],
+        to: firstBuild
+    )
+    _ = try await index.finishRebuild(firstBuild)
+    let secondBuild = try await index.beginRebuild(for: secondScope)
+    try await index.append([indexedObject("kept.txt")], to: secondBuild)
+    _ = try await index.finishRebuild(secondBuild)
+
+    let summaries = try await index.connectionSummaries()
+    #expect(summaries.count == 2)
+    #expect(
+        summaries.first(where: { $0.connectionID == fixture.scope.connectionID })?.objectCount == 2
+    )
+    #expect(summaries.first(where: { $0.connectionID == secondConnectionID })?.objectCount == 1)
+
+    try await index.removeAndCompact(connectionID: fixture.scope.connectionID)
+
+    #expect(try await index.snapshot(for: fixture.scope) == nil)
+    #expect(try await index.snapshot(for: secondScope)?.objectCount == 1)
+    #expect(try await index.connectionSummaries().map(\.connectionID) == [secondConnectionID])
+}
+
 @Test func objectSearchIndexDiscardsOnlyInterruptedGenerationOnReopen() async throws {
     let fixture = try SearchIndexFixture()
     defer { fixture.cleanup() }

@@ -764,6 +764,36 @@ actor CoreWorkbenchService: WorkbenchServing {
     ).url
   }
 
+  func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL {
+    guard let profile = try await connectionStore.load().first(where: { $0.id == location.connectionID })
+    else { throw S3ServiceError.notFound }
+    try Self.validate(
+      key: object.key,
+      bucket: location.bucket,
+      within: profile.resolvedAccessPath()
+    )
+    return try S3ObjectURLBuilder.url(profile: profile, bucket: location.bucket, key: object.key)
+  }
+
+  func searchIndexSummaries() async throws -> [ConnectionIndexSummary] {
+    guard let searchIndex else { return [] }
+    return try await searchIndex.connectionSummaries().map {
+      ConnectionIndexSummary(
+        connectionID: $0.connectionID,
+        scopeCount: $0.scopeCount,
+        objectCount: $0.objectCount,
+        indexedAt: $0.indexedAt,
+        isStale: $0.isStale
+      )
+    }
+  }
+
+  func clearSearchIndex(connectionID: UUID) async throws {
+    guard let searchIndex else { return }
+    await abandonSearchIndexBuilds(connectionID: connectionID)
+    try await searchIndex.removeAndCompact(connectionID: connectionID)
+  }
+
   func downloadForPreview(object: ObjectRow, at location: ObjectLocation) async throws -> URL {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("S3Workbench-Previews", isDirectory: true)

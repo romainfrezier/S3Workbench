@@ -591,6 +591,44 @@ import Testing
   }
 }
 
+@Test func unsignedURLNeedsNeitherCredentialsNorAnS3Service() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Public",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/public",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-UnsignedURL-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    credentialStore: FailingCredentialStore(),
+    s3ServiceFactory: { _, _ in throw S3ServiceError.service("S3 service should not be created.") }
+  )
+  let object = ObjectRow(
+    id: "object",
+    key: "public/report #1.txt",
+    displayName: "report #1.txt",
+    relativePath: "",
+    size: 1,
+    modifiedAt: nil,
+    storageClass: nil,
+    isPrefix: false
+  )
+
+  let url = try await service.unsignedURL(
+    for: object,
+    at: ObjectLocation(connectionID: connectionID, bucket: "bucket", prefix: "public/")
+  )
+
+  #expect(url.absoluteString == "https://storage.example.com/bucket/public/report%20%231.txt")
+}
+
 @Test func invalidatingAnInFlightContextCannotReinstallTheOldAccessRoot() async throws {
   let connectionID = UUID()
   let oldProfile = ConnectionProfile(
@@ -1992,6 +2030,20 @@ private final class InMemoryCredentialStore: CredentialStore, @unchecked Sendabl
 
   func remove(for connectionID: UUID) throws {
     lock.withLock { values[connectionID] = nil }
+  }
+}
+
+private struct FailingCredentialStore: CredentialStore {
+  func credentials(for connectionID: UUID) throws -> S3Credentials? {
+    throw S3ServiceError.service("Credentials should not be read.")
+  }
+
+  func save(_ credentials: S3Credentials, for connectionID: UUID) throws {
+    throw S3ServiceError.service("Credentials should not be saved.")
+  }
+
+  func remove(for connectionID: UUID) throws {
+    throw S3ServiceError.service("Credentials should not be removed.")
   }
 }
 

@@ -5,8 +5,11 @@ import UniformTypeIdentifiers
 
 struct WorkbenchRootView: View {
   @Bindable var model: WorkbenchViewModel
+  @Bindable var preferences: AppPreferences
+  @Bindable var settingsNavigation: SettingsNavigationModel
 
-  @State private var connectionDraft: ConnectionDraft?
+  @Environment(\.openSettings) private var openSettings
+
   @State private var isInspectorPresented = true
   @State private var isTransferPopoverPresented = false
   @State private var isUploadPresented = false
@@ -39,13 +42,6 @@ struct WorkbenchRootView: View {
     .onChange(of: model.searchQuery) { _, _ in
       Task { await model.searchQueryDidChange() }
     }
-    .sheet(item: $connectionDraft) { draft in
-      ConnectionEditorView(
-        draft: draft,
-        save: { await model.saveConnection($0) },
-        test: { try await model.testConnection($0) }
-      )
-    }
     .sheet(
       isPresented: Binding(
         get: { renameKey != nil },
@@ -65,8 +61,7 @@ struct WorkbenchRootView: View {
     .fileImporter(isPresented: $isDownloadDestinationPresented, allowedContentTypes: [.folder]) {
       result in
       if case .success(let url) = result {
-        pendingDownloadDirectory = url
-        isDownloadCollisionPresented = true
+        requestDownload(to: url)
       }
     }
     .confirmationDialog(
@@ -157,7 +152,7 @@ struct WorkbenchRootView: View {
           }
           .tag(connection.id)
           .contextMenu {
-            Button("Edit…") { connectionDraft = ConnectionDraft(connection: connection) }
+            Button("Connection Settings…") { openConnectionSettings(connection) }
             Button("Duplicate") { Task { await model.duplicateConnection(connection) } }
             Divider()
             Button("Delete", role: .destructive) {
@@ -171,7 +166,7 @@ struct WorkbenchRootView: View {
     .safeAreaInset(edge: .bottom) {
       HStack {
         Button {
-          connectionDraft = ConnectionDraft()
+          openNewConnectionSettings()
         } label: {
           Label("Add Connection", systemImage: "plus")
         }
@@ -195,7 +190,7 @@ struct WorkbenchRootView: View {
         } description: {
           Text("Add an S3-compatible endpoint to begin.")
         } actions: {
-          Button("Add Connection") { connectionDraft = ConnectionDraft() }
+          Button("Add Connection") { openNewConnectionSettings() }
         }
       }
     }
@@ -212,6 +207,7 @@ struct WorkbenchRootView: View {
     } else {
       ObjectBrowserView(
         model: model,
+        preferences: preferences,
         requestUpload: { isUploadPresented = true },
         requestDownload: { selection in
           model.selectedObjectIDs = selection
@@ -285,7 +281,9 @@ struct WorkbenchRootView: View {
         }
         Button("Download…") { perform(.download) }
           .disabled(!commandAvailability.isEnabled(.download))
-        Button("Copy Presigned URL") { copyPresignedURL() }
+        Button("Copy Unsigned URL") { copyUnsignedURL() }
+          .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
+        Button("Copy Signed URL") { copySignedURL() }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
         Button("Rename…") { renameKey = model.selectedObject?.key }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
@@ -299,7 +297,7 @@ struct WorkbenchRootView: View {
   }
 
   private var isModalPresented: Bool {
-    connectionDraft != nil || renameKey != nil || connectionToDelete != nil
+    renameKey != nil || connectionToDelete != nil
       || isUploadPresented || isDownloadDestinationPresented
       || isUploadCollisionPresented || isDownloadCollisionPresented
       || isDeleteConfirmationPresented || model.errorMessage != nil || model.previewURL != nil
@@ -319,7 +317,7 @@ struct WorkbenchRootView: View {
     case .search:
       isSearchFocused = true
     case .download:
-      isDownloadDestinationPresented = true
+      beginDownload()
     case .upload:
       isUploadPresented = true
     case .refresh:
@@ -347,18 +345,63 @@ struct WorkbenchRootView: View {
     }
   }
 
-  private func copyPresignedURL() {
+  private func copyUnsignedURL() {
     Task {
-      guard let url = await model.presignedURL() else { return }
-      NSPasteboard.general.clearContents()
-      NSPasteboard.general.setString(url.absoluteString, forType: .string)
+      guard let url = await model.unsignedURL() else { return }
+      copyToPasteboard(url)
     }
+  }
+
+  private func copySignedURL() {
+    Task {
+      guard let url = await model.presignedURL(expiresIn: preferences.signedURLLifetime.duration)
+      else { return }
+      copyToPasteboard(url)
+    }
+  }
+
+  private func copyToPasteboard(_ url: URL) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(url.absoluteString, forType: .string)
   }
 
   private func requestUpload(_ urls: [URL]) {
     guard !urls.isEmpty else { return }
     pendingUploadURLs = urls
-    isUploadCollisionPresented = true
+    if preferences.uploadCollision == .keepBoth {
+      performUpload(.keepBoth)
+    } else {
+      isUploadCollisionPresented = true
+    }
+  }
+
+  private func beginDownload() {
+    if preferences.downloadDestination == .downloads,
+      let directory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+    {
+      requestDownload(to: directory)
+    } else {
+      isDownloadDestinationPresented = true
+    }
+  }
+
+  private func requestDownload(to directory: URL) {
+    pendingDownloadDirectory = directory
+    if preferences.downloadCollision == .keepBoth {
+      performDownload(.keepBoth)
+    } else {
+      isDownloadCollisionPresented = true
+    }
+  }
+
+  private func openConnectionSettings(_ connection: ConnectionRow) {
+    settingsNavigation.request(.connection(connection.id), connections: model.connections)
+    openSettings()
+  }
+
+  private func openNewConnectionSettings() {
+    settingsNavigation.request(.newConnection(UUID()), connections: model.connections)
+    openSettings()
   }
 
   private func performUpload(_ collisionPolicy: CollisionPolicy) {
@@ -457,6 +500,7 @@ private struct BucketBrowserView: View {
 
 private struct ObjectBrowserView: View {
   @Bindable var model: WorkbenchViewModel
+  @Bindable var preferences: AppPreferences
   let requestUpload: () -> Void
   let requestDownload: (Set<ObjectRow.ID>) -> Void
   let queueUpload: ([URL]) -> Void
@@ -527,10 +571,20 @@ private struct ObjectBrowserView: View {
           }
         }
         if !object.isPrefix {
-          Button("Copy Presigned URL") {
+          Button("Copy Unsigned URL") {
             Task {
               model.select(object)
-              guard let url = await model.presignedURL() else { return }
+              guard let url = await model.unsignedURL() else { return }
+              NSPasteboard.general.clearContents()
+              NSPasteboard.general.setString(url.absoluteString, forType: .string)
+            }
+          }
+          Button("Copy Signed URL") {
+            Task {
+              model.select(object)
+              guard let url = await model.presignedURL(
+                expiresIn: preferences.signedURLLifetime.duration
+              ) else { return }
               NSPasteboard.general.clearContents()
               NSPasteboard.general.setString(url.absoluteString, forType: .string)
             }
@@ -947,7 +1001,6 @@ private struct ObjectInspectorView: View {
           description: Text("Select an object to inspect its metadata."))
       }
     }
-    .navigationTitle("Inspector")
   }
 }
 

@@ -33,6 +33,28 @@ public struct ObjectIndexSnapshot: Equatable, Sendable {
     }
 }
 
+public struct ObjectIndexConnectionSummary: Equatable, Sendable {
+    public let connectionID: UUID
+    public let scopeCount: Int
+    public let objectCount: Int
+    public let indexedAt: Date?
+    public let isStale: Bool
+
+    public init(
+        connectionID: UUID,
+        scopeCount: Int,
+        objectCount: Int,
+        indexedAt: Date?,
+        isStale: Bool
+    ) {
+        self.connectionID = connectionID
+        self.scopeCount = scopeCount
+        self.objectCount = objectCount
+        self.indexedAt = indexedAt
+        self.isStale = isStale
+    }
+}
+
 public struct ObjectIndexBuild: Hashable, Sendable {
     fileprivate let scope: ObjectIndexScope
     fileprivate let generation: String
@@ -357,6 +379,39 @@ public actor ObjectSearchIndex {
                 try stepDone(statement)
             }
         }
+    }
+
+    public func connectionSummaries() throws -> [ObjectIndexConnectionSummary] {
+        try database.withStatement(
+            """
+            SELECT connection_id, count(*), sum(object_count), max(indexed_at), max(is_stale)
+            FROM search_scopes
+            WHERE active_generation IS NOT NULL
+            GROUP BY connection_id
+            ORDER BY connection_id
+            """
+        ) { statement in
+            var summaries: [ObjectIndexConnectionSummary] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let value = text(statement, column: 0), let connectionID = UUID(uuidString: value)
+                else { throw ObjectSearchIndexError.unavailable }
+                summaries.append(
+                    ObjectIndexConnectionSummary(
+                        connectionID: connectionID,
+                        scopeCount: Int(sqlite3_column_int64(statement, 1)),
+                        objectCount: Int(sqlite3_column_int64(statement, 2)),
+                        indexedAt: optionalDate(statement, column: 3),
+                        isStale: sqlite3_column_int(statement, 4) != 0
+                    )
+                )
+            }
+            return summaries
+        }
+    }
+
+    public func removeAndCompact(connectionID: UUID) throws {
+        try remove(connectionID: connectionID)
+        try database.execute("VACUUM")
     }
 
     private static func migrate(_ database: SQLiteConnection) throws {
