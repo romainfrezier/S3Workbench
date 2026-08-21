@@ -26,6 +26,10 @@ enum DownloadDestinationPreference: String, CaseIterable, Identifiable {
 
   var id: Self { self }
   var label: String { self == .alwaysAsk ? "Always Ask" : "Downloads" }
+
+  func directory(from downloadsDirectories: [URL]) -> URL? {
+    self == .downloads ? downloadsDirectories.first : nil
+  }
 }
 
 enum SafeCollisionPreference: String, CaseIterable, Identifiable {

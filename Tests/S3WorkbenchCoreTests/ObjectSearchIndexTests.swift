@@ -186,7 +186,7 @@ import Testing
     )
     #expect(summaries.first(where: { $0.connectionID == secondConnectionID })?.objectCount == 1)
 
-    try await index.removeAndCompact(connectionID: fixture.scope.connectionID)
+    try await index.remove(connectionID: fixture.scope.connectionID)
 
     #expect(try await index.snapshot(for: fixture.scope) == nil)
     #expect(try await index.snapshot(for: secondScope)?.objectCount == 1)

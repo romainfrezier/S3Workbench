@@ -409,11 +409,6 @@ public actor ObjectSearchIndex {
         }
     }
 
-    public func removeAndCompact(connectionID: UUID) throws {
-        try remove(connectionID: connectionID)
-        try database.execute("VACUUM")
-    }
-
     private static func migrate(_ database: SQLiteConnection) throws {
         let version = try database.int32Value(sql: "PRAGMA user_version")
         guard version <= schemaVersion else { throw ObjectSearchIndexError.incompatibleSchema }

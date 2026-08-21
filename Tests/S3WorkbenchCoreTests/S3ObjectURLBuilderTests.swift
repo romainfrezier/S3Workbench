@@ -47,4 +47,7 @@ import Testing
     #expect(throws: S3ServiceError.self) {
         try S3ObjectURLBuilder.url(profile: profile, bucket: "Not_DNS", key: "object.txt")
     }
+    #expect(throws: S3ServiceError.self) {
+        try S3ObjectURLBuilder.url(profile: profile, bucket: "bücket", key: "object.txt")
+    }
 }

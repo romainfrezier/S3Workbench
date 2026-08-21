@@ -84,12 +84,19 @@ public enum S3ObjectURLBuilder {
     }
 
     private static func isDNSCompatibleBucket(_ bucket: String) -> Bool {
-        guard (3...63).contains(bucket.count), let first = bucket.first, let last = bucket.last,
-              first.isLetter || first.isNumber, last.isLetter || last.isNumber,
+        let bytes = bucket.utf8
+        guard (3...63).contains(bytes.count), let first = bytes.first, let last = bytes.last,
+              isLowercaseASCIIOrDigit(first), isLowercaseASCIIOrDigit(last),
               !bucket.contains(".."), !bucket.contains(".-"), !bucket.contains("-.") else {
             return false
         }
-        return bucket.allSatisfy { $0.isLowercase || $0.isNumber || $0 == "." || $0 == "-" }
+        return bytes.allSatisfy {
+            isLowercaseASCIIOrDigit($0) || $0 == 0x2E || $0 == 0x2D
+        }
             && !isIPAddress(bucket)
+    }
+
+    private static func isLowercaseASCIIOrDigit(_ byte: UInt8) -> Bool {
+        (97...122).contains(byte) || (48...57).contains(byte)
     }
 }

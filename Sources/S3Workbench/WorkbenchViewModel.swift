@@ -472,8 +472,9 @@ final class WorkbenchViewModel {
     }
   }
 
-  func removeConnection(_ connection: ConnectionRow) async {
-    await perform {
+  @discardableResult
+  func removeConnection(_ connection: ConnectionRow) async -> Bool {
+    do {
       try await service.removeConnection(id: connection.id)
       connections.removeAll { $0.id == connection.id }
       connectionIndexSummaries.removeAll { $0.connectionID == connection.id }
@@ -481,6 +482,10 @@ final class WorkbenchViewModel {
         selectedConnectionID = connections.first?.id
         await reloadConnection()
       }
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
     }
   }
 

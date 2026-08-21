@@ -48,8 +48,9 @@ final class SettingsNavigationModel {
       let value = ConnectionDraft(connection: connection)
       draft = value
       originalDraft = value
-    case .newConnection:
-      let value = ConnectionDraft()
+    case .newConnection(let id):
+      var value = ConnectionDraft()
+      value.id = id
       draft = value
       originalDraft = value
     }
@@ -93,7 +94,9 @@ struct WorkbenchSettingsView: View {
             .tag(SettingsDestination.connection(connection.id))
             .contextMenu {
               Button("Duplicate") { duplicate(connection) }
+                .disabled(navigation.hasUnsavedChanges)
               Button("Delete", role: .destructive) { connectionToDelete = connection }
+                .disabled(navigation.hasUnsavedChanges)
             }
           }
           if case .newConnection(let id) = navigation.destination {
@@ -123,6 +126,19 @@ struct WorkbenchSettingsView: View {
     .navigationSplitViewStyle(.balanced)
     .frame(width: 860, height: 660)
     .task { await model.loadSearchIndexSummaries() }
+    .safeAreaInset(edge: .top) {
+      if let errorMessage = model.errorMessage {
+        HStack(spacing: 10) {
+          Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+            .foregroundStyle(.orange)
+          Spacer()
+          Button("Dismiss") { model.errorMessage = nil }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
+      }
+    }
     .confirmationDialog(
       "Unsaved connection changes",
       isPresented: $navigation.isUnsavedConfirmationPresented,
@@ -148,17 +164,6 @@ struct WorkbenchSettingsView: View {
       Button("Delete Connection", role: .destructive) { deleteConnection() }
     } message: {
       Text("Its saved settings, Keychain credentials, certificate, and local search index will be removed.")
-    }
-    .alert(
-      "Operation Failed",
-      isPresented: Binding(
-        get: { model.errorMessage != nil },
-        set: { if !$0 { model.errorMessage = nil } }
-      )
-    ) {
-      Button("OK") { model.errorMessage = nil }
-    } message: {
-      Text(model.errorMessage ?? "Unknown error")
     }
   }
 
@@ -210,8 +215,9 @@ struct WorkbenchSettingsView: View {
     guard let connection = connectionToDelete else { return }
     connectionToDelete = nil
     Task {
-      await model.removeConnection(connection)
-      navigation.activate(.app, connections: model.connections)
+      if await model.removeConnection(connection) {
+        navigation.activate(.app, connections: model.connections)
+      }
     }
   }
 }
@@ -285,6 +291,7 @@ private struct ConnectionSettingsDetail: View {
         if let connection {
           Button("Delete Connection", role: .destructive) { requestDelete(connection) }
           Button("Duplicate") { duplicate(connection) }
+            .disabled(navigation.hasUnsavedChanges)
         }
         Spacer()
         Button("Test Connection") { Task { await testDraft() } }

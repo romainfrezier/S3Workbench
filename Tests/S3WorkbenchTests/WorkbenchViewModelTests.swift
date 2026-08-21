@@ -31,6 +31,25 @@ import Testing
 }
 
 @MainActor
+@Test func failedConnectionRemovalKeepsTheConnectionAndSelection() async {
+  let connection = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [connection],
+    listObjectsResult: .success(.empty),
+    removeConnectionHandler: { _ in throw S3ServiceError.networkUnavailable }
+  )
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+
+  let removed = await model.removeConnection(connection)
+
+  #expect(!removed)
+  #expect(model.connections == [connection])
+  #expect(model.selectedConnectionID == connection.id)
+  #expect(model.errorMessage == S3ServiceError.networkUnavailable.localizedDescription)
+}
+
+@MainActor
 @Test func objectLoadingFailureIsNotPresentedAsAnEmptyPrefix() async throws {
   let connectionID = UUID()
   let service = StubWorkbenchService(
@@ -1665,12 +1684,15 @@ private typealias ListObjectsHandler = @Sendable (
 
 private typealias BucketListHandler = @Sendable (UUID) async throws -> [BucketRow]
 
+private typealias RemoveConnectionHandler = @Sendable (UUID) async throws -> Void
+
 private actor StubWorkbenchService: WorkbenchServing {
   let connections: [ConnectionRow]
   private var listObjectsResult: Result<ObjectPage, Error>
   private let bucketListHandler: BucketListHandler?
   private let listObjectsHandler: ListObjectsHandler?
   private let searchHandler: SearchHandler?
+  private let removeConnectionHandler: RemoveConnectionHandler?
   private(set) var bucketListCallCount = 0
   private(set) var lastObjectLocation: ObjectLocation?
   private(set) var searchCalls: [SearchCall] = []
@@ -1680,13 +1702,15 @@ private actor StubWorkbenchService: WorkbenchServing {
     listObjectsResult: Result<ObjectPage, Error>,
     searchHandler: SearchHandler? = nil,
     listObjectsHandler: ListObjectsHandler? = nil,
-    bucketListHandler: BucketListHandler? = nil
+    bucketListHandler: BucketListHandler? = nil,
+    removeConnectionHandler: RemoveConnectionHandler? = nil
   ) {
     self.connections = connections
     self.listObjectsResult = listObjectsResult
     self.listObjectsHandler = listObjectsHandler
     self.bucketListHandler = bucketListHandler
     self.searchHandler = searchHandler
+    self.removeConnectionHandler = removeConnectionHandler
   }
 
   func loadConnections() async throws -> [ConnectionRow] { connections }
@@ -1699,7 +1723,9 @@ private actor StubWorkbenchService: WorkbenchServing {
   func duplicateConnection(id: UUID) async throws -> ConnectionRow {
     throw S3ServiceError.unsupported("Not used by this test.")
   }
-  func removeConnection(id: UUID) async throws {}
+  func removeConnection(id: UUID) async throws {
+    if let removeConnectionHandler { try await removeConnectionHandler(id) }
+  }
   func testConnection(_ draft: ConnectionDraft) async throws {}
   func listBuckets(connectionID: UUID) async throws -> [BucketRow] {
     bucketListCallCount += 1

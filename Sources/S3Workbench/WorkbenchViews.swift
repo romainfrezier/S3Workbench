@@ -376,9 +376,11 @@ struct WorkbenchRootView: View {
   }
 
   private func beginDownload() {
-    if preferences.downloadDestination == .downloads,
-      let directory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-    {
+    let downloadsDirectories = FileManager.default.urls(
+      for: .downloadsDirectory,
+      in: .userDomainMask
+    )
+    if let directory = preferences.downloadDestination.directory(from: downloadsDirectories) {
       requestDownload(to: directory)
     } else {
       isDownloadDestinationPresented = true

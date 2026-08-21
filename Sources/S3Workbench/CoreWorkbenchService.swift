@@ -791,7 +791,7 @@ actor CoreWorkbenchService: WorkbenchServing {
   func clearSearchIndex(connectionID: UUID) async throws {
     guard let searchIndex else { return }
     await abandonSearchIndexBuilds(connectionID: connectionID)
-    try await searchIndex.removeAndCompact(connectionID: connectionID)
+    try await searchIndex.remove(connectionID: connectionID)
   }
 
   func downloadForPreview(object: ObjectRow, at location: ObjectLocation) async throws -> URL {
