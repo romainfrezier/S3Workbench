@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SQLite3
 import S3WorkbenchCore
@@ -1592,6 +1593,194 @@ import Testing
   }
 }
 
+@MainActor
+@Test func promisedFileDownloadStartsOnlyWhenTheRepresentationIsRequested() async throws {
+  let key = "restricted/reports/summary.txt"
+  let object = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  let payload = Data("promised contents".utf8)
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty),
+    downloadHandler: { _, _, destination in
+      try payload.write(to: destination)
+    }
+  )
+  let model = filePromiseModel(objects: [object], selected: [object.id], service: service)
+  let directory = try temporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let destination = directory.appendingPathComponent("summary.txt")
+
+  let provider = try #require(model.filePromiseProviders(for: object).first)
+
+  #expect(await service.downloadCalls.isEmpty)
+  #expect(try promisedFilename(from: provider) == "summary.txt")
+
+  try await fulfill(provider, to: destination)
+  let calls = await service.downloadCalls
+
+  #expect(try Data(contentsOf: destination) == payload)
+  #expect(calls.count == 1)
+  #expect(calls.first?.object.key == key)
+  #expect(calls.first?.location.prefix == "restricted/reports/")
+  #expect(calls.first?.destination == destination)
+}
+
+@MainActor
+@Test func selectedObjectsCreateIndependentPromisesWithoutNormalizingTheirKeys() async throws {
+  let composedKey = "restricted/reports/café.txt"
+  let decomposedKey = "restricted/reports/cafe\u{301}.txt"
+  let composed = searchObject(
+    id: ObjectRow.id(for: composedKey, isPrefix: false), key: composedKey)
+  let decomposed = searchObject(
+    id: ObjectRow.id(for: decomposedKey, isPrefix: false), key: decomposedKey)
+  let selected = Set([composed.id, decomposed.id])
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty),
+    downloadHandler: { object, _, destination in
+      try Data(object.key.utf8).write(to: destination)
+    }
+  )
+  let model = filePromiseModel(
+    objects: [composed, decomposed], selected: selected, service: service)
+  model.continuationToken = "next-page"
+  let directory = try temporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let providers = model.filePromiseProviders(for: composed)
+  #expect(providers.count == 2)
+  #expect(await service.downloadCalls.isEmpty)
+  let filenames = try providers.map(promisedFilename)
+  #expect(filenames[0].utf8.elementsEqual("café.txt".utf8))
+  #expect(filenames[1].utf8.elementsEqual("cafe\u{301}.txt".utf8))
+
+  for (index, provider) in providers.enumerated() {
+    let child = directory.appendingPathComponent("\(index)", isDirectory: true)
+    try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+    let destination = child.appendingPathComponent(filenames[index])
+    try await fulfill(provider, to: destination)
+  }
+  let calls = await service.downloadCalls
+
+  #expect(calls.count == 2)
+  #expect(calls[0].object.key.utf8.elementsEqual(composedKey.utf8))
+  #expect(calls[1].object.key.utf8.elementsEqual(decomposedKey.utf8))
+  #expect(model.selectedObjectIDs == selected)
+  #expect(model.prefix == "restricted/reports/")
+  #expect(model.continuationToken == "next-page")
+}
+
+@MainActor
+@Test func prefixesAndInvalidLocalFilenamesDoNotCreateFilePromises() async {
+  let prefix = ObjectRow(
+    id: ObjectRow.id(for: "restricted/folder/", isPrefix: true),
+    key: "restricted/folder/",
+    displayName: "folder",
+    relativePath: "",
+    size: 0,
+    modifiedAt: nil,
+    storageClass: nil,
+    isPrefix: true
+  )
+  let invalid = ObjectRow(
+    id: ObjectRow.id(for: "restricted/.", isPrefix: false),
+    key: "restricted/.",
+    displayName: ".",
+    relativePath: "",
+    size: 1,
+    modifiedAt: nil,
+    storageClass: nil,
+    isPrefix: false
+  )
+  let service = StubWorkbenchService(connections: [], listObjectsResult: .success(.empty))
+  let model = filePromiseModel(
+    objects: [prefix, invalid], selected: [invalid.id], service: service)
+
+  #expect(model.filePromiseProviders(for: prefix).isEmpty)
+  #expect(model.filePromiseProviders(for: invalid).isEmpty)
+  #expect(model.filePromiseErrorMessage == WorkbenchUIError.invalidExportFilename.localizedDescription)
+  #expect(await service.downloadCalls.isEmpty)
+}
+
+@MainActor
+@Test func promisedFileFailureIsReportedWithoutClearingBrowseState() async throws {
+  let key = "restricted/reports/failure.txt"
+  let object = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty),
+    downloadHandler: { _, _, _ in throw S3ServiceError.networkUnavailable }
+  )
+  let model = filePromiseModel(objects: [object], selected: [object.id], service: service)
+  model.continuationToken = "next-page"
+  let provider = try #require(model.filePromiseProviders(for: object).first)
+  let directory = try temporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  await #expect(throws: (any Error).self) {
+    try await fulfill(provider, to: directory.appendingPathComponent("failure.txt"))
+  }
+
+  #expect(model.filePromiseErrorMessage == S3ServiceError.networkUnavailable.localizedDescription)
+  #expect(model.objects == [object])
+  #expect(model.selectedObjectIDs == [object.id])
+  #expect(model.continuationToken == "next-page")
+}
+
+@MainActor
+@Test func latePromisedFileIsRejectedWhenTheBrowseContextChanges() async throws {
+  let key = "restricted/reports/stale.txt"
+  let object = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  let probe = DelayedPromiseDownloadProbe()
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty),
+    downloadHandler: { object, _, destination in
+      try await probe.write(object: object, to: destination)
+    }
+  )
+  let model = filePromiseModel(objects: [object], selected: [object.id], service: service)
+  let promise = try #require(model.filePromises(for: object).first)
+  let directory = try temporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let destination = directory.appendingPathComponent("stale.txt")
+
+  let fulfillment = Task { try await model.fulfillFilePromise(promise, to: destination) }
+  #expect(await waitForPromiseDownload(probe))
+  model.prefix = "restricted/other/"
+  await probe.release()
+
+  await #expect(throws: WorkbenchUIError.self) { try await fulfillment.value }
+  #expect(!FileManager.default.fileExists(atPath: destination.path))
+  #expect(model.filePromiseErrorMessage == WorkbenchUIError.staleFilePromise.localizedDescription)
+}
+
+@MainActor
+@Test func cancellingPromisedFileLoadingCancelsTheDownload() async throws {
+  let key = "restricted/reports/large.bin"
+  let object = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  let downloadProbe = CancelledPromiseDownloadProbe()
+  let service = StubWorkbenchService(
+    connections: [],
+    listObjectsResult: .success(.empty),
+    downloadHandler: { _, _, _ in try await downloadProbe.run() }
+  )
+  let model = filePromiseModel(objects: [object], selected: [object.id], service: service)
+  let promise = try #require(model.filePromises(for: object).first)
+  let directory = try temporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let destination = directory.appendingPathComponent("large.bin")
+
+  let fulfillment = Task { try await model.fulfillFilePromise(promise, to: destination) }
+  #expect(await waitForPromiseDownload(downloadProbe))
+
+  fulfillment.cancel()
+
+  await #expect(throws: (any Error).self) { try await fulfillment.value }
+  #expect(await waitForPromiseCancellation(downloadProbe))
+  #expect(model.filePromiseErrorMessage == nil)
+}
+
 @Test func transferManagerEnforcesItsConcurrencyLimit() async throws {
   let manager = TransferManager<Int>(maximumConcurrentTransfers: 2)
   let probe = ConcurrencyProbe()
@@ -1608,6 +1797,24 @@ import Testing
 
   #expect(await probe.maximum == 2)
   #expect(await manager.rows().allSatisfy { $0.state == .completed })
+}
+
+@Test func cancellingACompletionWaitCancelsQueuedAndRunningTransfers() async throws {
+  let manager = TransferManager<Int>(maximumConcurrentTransfers: 1)
+  let first = await manager.enqueue(1, title: "First", subtitle: "Test") { _, _ in
+    try await Task.sleep(for: .seconds(60))
+  }
+  let second = await manager.enqueue(2, title: "Second", subtitle: "Test") { _, _ in
+    try await Task.sleep(for: .seconds(60))
+  }
+  let waiter = Task { try await manager.waitForCompletion(of: [first, second]) }
+  #expect(await waitForTransferState(.running, in: manager))
+
+  waiter.cancel()
+
+  await #expect(throws: (any Error).self) { try await waiter.value }
+  #expect(await waitForCancelledTransfers(count: 2, in: manager))
+  #expect(await manager.rows().allSatisfy { $0.state == .cancelled })
 }
 
 private struct SearchCall: Equatable, Sendable {
@@ -1627,20 +1834,33 @@ private typealias ListObjectsHandler = @Sendable (
 
 private typealias BucketListHandler = @Sendable (UUID) async throws -> [BucketRow]
 
+private struct DownloadCall: Sendable {
+  let object: ObjectRow
+  let location: ObjectLocation
+  let destination: URL
+}
+
+private typealias DownloadHandler = @Sendable (
+  ObjectRow, ObjectLocation, URL
+) async throws -> Void
+
 private actor StubWorkbenchService: WorkbenchServing {
   let connections: [ConnectionRow]
   private var listObjectsResult: Result<ObjectPage, Error>
   private let bucketListHandler: BucketListHandler?
   private let listObjectsHandler: ListObjectsHandler?
   private let searchHandler: SearchHandler?
+  private let downloadHandler: DownloadHandler?
   private(set) var bucketListCallCount = 0
   private(set) var lastObjectLocation: ObjectLocation?
   private(set) var searchCalls: [SearchCall] = []
+  private(set) var downloadCalls: [DownloadCall] = []
 
   init(
     connections: [ConnectionRow],
     listObjectsResult: Result<ObjectPage, Error>,
     searchHandler: SearchHandler? = nil,
+    downloadHandler: DownloadHandler? = nil,
     listObjectsHandler: ListObjectsHandler? = nil,
     bucketListHandler: BucketListHandler? = nil
   ) {
@@ -1649,6 +1869,7 @@ private actor StubWorkbenchService: WorkbenchServing {
     self.listObjectsHandler = listObjectsHandler
     self.bucketListHandler = bucketListHandler
     self.searchHandler = searchHandler
+    self.downloadHandler = downloadHandler
   }
 
   func loadConnections() async throws -> [ConnectionRow] { connections }
@@ -1703,6 +1924,17 @@ private actor StubWorkbenchService: WorkbenchServing {
     objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
     collisionPolicy: CollisionPolicy
   ) async throws {}
+  func download(object: ObjectRow, from location: ObjectLocation, to destination: URL) async throws {
+    downloadCalls.append(
+      DownloadCall(
+        object: object,
+        location: location,
+        destination: destination
+      ))
+    if let downloadHandler {
+      try await downloadHandler(object, location, destination)
+    }
+  }
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws {}
   func move(
     object: ObjectRow, from location: ObjectLocation, toKey: String,
@@ -1728,6 +1960,39 @@ private actor ConcurrencyProbe {
     maximum = max(maximum, active)
     try? await Task.sleep(for: .milliseconds(20))
     active -= 1
+  }
+}
+
+private actor DelayedPromiseDownloadProbe {
+  private(set) var didStart = false
+  private var isReleased = false
+
+  func write(object: ObjectRow, to destination: URL) async throws {
+    didStart = true
+    while !isReleased {
+      try Task.checkCancellation()
+      await Task.yield()
+    }
+    try Data(object.key.utf8).write(to: destination)
+  }
+
+  func release() {
+    isReleased = true
+  }
+}
+
+private actor CancelledPromiseDownloadProbe {
+  private(set) var didStart = false
+  private(set) var didCancel = false
+
+  func run() async throws {
+    didStart = true
+    do {
+      try await Task.sleep(for: .seconds(60))
+    } catch {
+      didCancel = true
+      throw error
+    }
   }
 }
 
@@ -2171,6 +2436,95 @@ private func searchSnapshotsMatch(
   return lhs.objectCount == rhs.objectCount
     && lhs.isStale == rhs.isStale
     && abs(lhs.indexedAt.timeIntervalSince(rhs.indexedAt)) < 0.001
+}
+
+@MainActor
+private func filePromiseModel(
+  objects: [ObjectRow], selected: Set<ObjectRow.ID>, service: StubWorkbenchService
+) -> WorkbenchViewModel {
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.prefix = "restricted/reports/"
+  model.objects = objects
+  model.selectedObjectIDs = selected
+  return model
+}
+
+@MainActor
+private func promisedFilename(from provider: NSFilePromiseProvider) throws -> String {
+  guard let delegate = provider.delegate else {
+    throw S3ServiceError.service("The promised file has no delegate.")
+  }
+  return delegate.filePromiseProvider(provider, fileNameForType: provider.fileType)
+}
+
+@MainActor
+private func fulfill(_ provider: NSFilePromiseProvider, to destination: URL) async throws {
+  guard let delegate = provider.delegate else {
+    throw S3ServiceError.service("The promised file has no delegate.")
+  }
+  try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+    delegate.filePromiseProvider(provider, writePromiseTo: destination) { error in
+      if let error {
+        continuation.resume(throwing: error)
+      } else {
+        continuation.resume()
+      }
+    }
+  }
+}
+
+private func temporaryDirectory() throws -> URL {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3WorkbenchTests", isDirectory: true)
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  return directory
+}
+
+private func waitForPromiseDownload(_ probe: DelayedPromiseDownloadProbe) async -> Bool {
+  for _ in 0..<10_000 {
+    if await probe.didStart { return true }
+    await Task.yield()
+  }
+  return false
+}
+
+private func waitForPromiseDownload(_ probe: CancelledPromiseDownloadProbe) async -> Bool {
+  for _ in 0..<10_000 {
+    if await probe.didStart { return true }
+    await Task.yield()
+  }
+  return false
+}
+
+private func waitForPromiseCancellation(_ probe: CancelledPromiseDownloadProbe) async -> Bool {
+  for _ in 0..<10_000 {
+    if await probe.didCancel { return true }
+    await Task.yield()
+  }
+  return false
+}
+
+private func waitForTransferState<Operation: Sendable>(
+  _ state: TransferState, in manager: TransferManager<Operation>
+) async -> Bool {
+  for _ in 0..<10_000 {
+    if await manager.rows().contains(where: { $0.state == state }) { return true }
+    await Task.yield()
+  }
+  return false
+}
+
+private func waitForCancelledTransfers<Operation: Sendable>(
+  count: Int, in manager: TransferManager<Operation>
+) async -> Bool {
+  for _ in 0..<10_000 {
+    if await manager.rows().filter({ $0.state == .cancelled }).count == count { return true }
+    await Task.yield()
+  }
+  return false
 }
 
 @MainActor

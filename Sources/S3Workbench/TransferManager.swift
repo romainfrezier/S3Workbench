@@ -45,11 +45,21 @@ actor TransferManager<Operation: Sendable> {
   }
 
   func waitForCompletion(of ids: [UUID]) async throws {
-    for id in ids { await tasks[id]?.value }
-    for id in ids {
-      guard let entry = entries[id] else { continue }
-      if entry.row.state == .cancelled { throw S3ServiceError.cancelled }
-      if let error = entry.error { throw error }
+    try await withTaskCancellationHandler {
+      for id in ids {
+        try Task.checkCancellation()
+        await tasks[id]?.value
+      }
+      try Task.checkCancellation()
+      for id in ids {
+        guard let entry = entries[id] else { continue }
+        if entry.row.state == .cancelled { throw S3ServiceError.cancelled }
+        if let error = entry.error { throw error }
+      }
+    } onCancel: {
+      Task {
+        for id in ids { await self.cancel(id: id) }
+      }
     }
   }
 
@@ -63,6 +73,9 @@ actor TransferManager<Operation: Sendable> {
   }
 
   func cancel(id: UUID) {
+    guard let state = entries[id]?.row.state, state == .queued || state == .running else {
+      return
+    }
     tasks[id]?.cancel()
     update(id: id, state: .cancelled)
   }
@@ -96,6 +109,7 @@ actor TransferManager<Operation: Sendable> {
       try await executor(operation) { [weak self] progress in
         Task { await self?.update(id: id, progress: progress) }
       }
+      try Task.checkCancellation()
       update(id: id, progress: 1, state: .completed)
     } catch is CancellationError {
       update(id: id, state: .cancelled)
