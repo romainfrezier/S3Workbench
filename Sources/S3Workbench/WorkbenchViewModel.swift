@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import S3WorkbenchCore
@@ -39,6 +40,7 @@ final class WorkbenchViewModel {
   private(set) var objectErrorSecondaryMessage: String?
   private(set) var paginationErrorMessage: String?
   private(set) var paginationErrorSecondaryMessage: String?
+  private(set) var filePromiseErrorMessage: String?
   var previewURL: URL? {
     didSet {
       guard oldValue != previewURL, let oldValue, isManagedPreview(oldValue) else { return }
@@ -521,6 +523,72 @@ final class WorkbenchViewModel {
     }
   }
 
+  func prepareFilePromiseDrag(for object: ObjectRow) {
+    guard let currentObject = objects.first(where: {
+      $0.id == object.id && $0.key.utf8.elementsEqual(object.key.utf8)
+    }), !currentObject.isPrefix, !selectedObjectIDs.contains(currentObject.id)
+    else { return }
+    select(currentObject)
+  }
+
+  func filePromiseProviders(for object: ObjectRow) -> [NSFilePromiseProvider] {
+    filePromises(for: object).map { promise in
+      ObjectFilePromiseProvider.make(for: promise) { [weak self] promise, destination in
+        guard let self else { throw WorkbenchUIError.staleFilePromise }
+        try await self.fulfillFilePromise(promise, to: destination)
+      }
+    }
+  }
+
+  func filePromises(for object: ObjectRow) -> [ObjectFilePromise] {
+    guard let location,
+      let currentObject = objects.first(where: {
+        $0.id == object.id && $0.key.utf8.elementsEqual(object.key.utf8)
+      }), !currentObject.isPrefix
+    else {
+      return []
+    }
+    if !selectedObjectIDs.contains(currentObject.id) { select(currentObject) }
+    let selectedObjects = selectedObjects
+    guard selectedObjects.count == selectedObjectIDs.count,
+      !selectedObjects.isEmpty, !selectedObjects.contains(where: \.isPrefix)
+    else {
+      return []
+    }
+    do {
+      return try selectedObjects.map {
+        try ObjectFilePromise(
+          location: location, object: $0, selectionIDs: selectedObjectIDs)
+      }
+    } catch {
+      filePromiseErrorMessage = error.localizedDescription
+      return []
+    }
+  }
+
+  func fulfillFilePromise(_ promise: ObjectFilePromise, to destination: URL) async throws {
+    do {
+      guard isCurrent(promise) else { throw WorkbenchUIError.staleFilePromise }
+      try Task.checkCancellation()
+      try await service.download(
+        object: promise.object, from: promise.location, to: destination)
+      try Task.checkCancellation()
+      guard isCurrent(promise), FileManager.default.fileExists(atPath: destination.path) else {
+        try? FileManager.default.removeItem(at: destination)
+        throw WorkbenchUIError.staleFilePromise
+      }
+    } catch {
+      if !(error is CancellationError), (error as? S3ServiceError) != .cancelled {
+        filePromiseErrorMessage = error.localizedDescription
+      }
+      throw error
+    }
+  }
+
+  func dismissFilePromiseError() {
+    filePromiseErrorMessage = nil
+  }
+
   func deleteSelected() async {
     guard let location, !selectedObjects.isEmpty else { return }
     await perform {
@@ -622,6 +690,15 @@ final class WorkbenchViewModel {
 
   private func isManagedPreview(_ url: URL) -> Bool {
     url.path.contains("/S3Workbench-Previews/")
+  }
+
+  private func isCurrent(_ promise: ObjectFilePromise) -> Bool {
+    location == promise.location && selectedObjectIDs == promise.selectionIDs
+      && objects.contains {
+        $0.id == promise.object.id
+          && $0.key.utf8.elementsEqual(promise.object.key.utf8)
+          && !$0.isPrefix
+      }
   }
 
   private func runSearch(_ context: ObjectSearchContext) async {

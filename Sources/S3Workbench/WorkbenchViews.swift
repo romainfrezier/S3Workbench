@@ -519,10 +519,20 @@ private struct ObjectBrowserView: View {
   var body: some View {
     Table(displayedObjects, selection: $model.selectedObjectIDs, sortOrder: $sortOrder) {
       TableColumn("Name", sortUsing: ObjectSortComparator(column: .name)) { object in
-        Label(
-          object.displayName,
-          systemImage: object.isPrefix ? "folder.fill" : symbol(for: object.displayName)
-        )
+        if object.isPrefix {
+          Label(object.displayName, systemImage: "folder.fill")
+        } else {
+          HStack(spacing: 4) {
+            ObjectFilePromiseDragSource(
+              symbolName: symbol(for: object.displayName),
+              prepareSelection: { model.prepareFilePromiseDrag(for: object) },
+              makeProviders: { model.filePromiseProviders(for: object) }
+            )
+            .frame(width: 16, height: 16)
+            .help("Drag to Finder")
+            Text(object.displayName)
+          }
+        }
       }
       .width(min: 220, ideal: 420)
       if model.isSearchMode {
@@ -704,7 +714,9 @@ private struct ObjectBrowserView: View {
       }
     }
     .safeAreaInset(edge: .top) {
-      if let error = model.searchErrorMessage, !model.objects.isEmpty {
+      if let error = model.filePromiseErrorMessage {
+        DismissibleErrorBanner(message: error) { model.dismissFilePromiseError() }
+      } else if let error = model.searchErrorMessage, !model.objects.isEmpty {
         RefreshErrorBanner(
           message: error,
           secondaryMessage: model.searchErrorSecondaryMessage
@@ -898,6 +910,24 @@ private struct RefreshErrorBanner: View {
     .padding(.horizontal, 12)
     .padding(.vertical, 7)
     .background(.bar)
+  }
+}
+
+private struct DismissibleErrorBanner: View {
+  let message: String
+  let dismiss: () -> Void
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+      Text(message).font(.callout)
+      Spacer()
+      Button("Dismiss", action: dismiss)
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
+    .background(.bar)
+    .accessibilityElement(children: .combine)
   }
 }
 
