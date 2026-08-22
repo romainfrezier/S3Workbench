@@ -32,6 +32,25 @@ import Testing
 }
 
 @MainActor
+@Test func failedConnectionRemovalKeepsTheConnectionAndSelection() async {
+  let connection = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [connection],
+    listObjectsResult: .success(.empty),
+    removeConnectionHandler: { _ in throw S3ServiceError.networkUnavailable }
+  )
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+
+  let removed = await model.removeConnection(connection)
+
+  #expect(!removed)
+  #expect(model.connections == [connection])
+  #expect(model.selectedConnectionID == connection.id)
+  #expect(model.errorMessage == S3ServiceError.networkUnavailable.localizedDescription)
+}
+
+@MainActor
 @Test func objectLoadingFailureIsNotPresentedAsAnEmptyPrefix() async throws {
   let connectionID = UUID()
   let service = StubWorkbenchService(
@@ -590,6 +609,44 @@ import Testing
     try CoreWorkbenchService.validate(
       key: "restricted/object.txt", bucket: "e\u{301}", within: composedBucketRoot)
   }
+}
+
+@Test func unsignedURLNeedsNeitherCredentialsNorAnS3Service() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Public",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/public",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-UnsignedURL-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    credentialStore: FailingCredentialStore(),
+    s3ServiceFactory: { _, _ in throw S3ServiceError.service("S3 service should not be created.") }
+  )
+  let object = ObjectRow(
+    id: "object",
+    key: "public/report #1.txt",
+    displayName: "report #1.txt",
+    relativePath: "",
+    size: 1,
+    modifiedAt: nil,
+    storageClass: nil,
+    isPrefix: false
+  )
+
+  let url = try await service.unsignedURL(
+    for: object,
+    at: ObjectLocation(connectionID: connectionID, bucket: "bucket", prefix: "public/")
+  )
+
+  #expect(url.absoluteString == "https://storage.example.com/bucket/public/report%20%231.txt")
 }
 
 @Test func invalidatingAnInFlightContextCannotReinstallTheOldAccessRoot() async throws {
@@ -1834,6 +1891,8 @@ private typealias ListObjectsHandler = @Sendable (
 
 private typealias BucketListHandler = @Sendable (UUID) async throws -> [BucketRow]
 
+private typealias RemoveConnectionHandler = @Sendable (UUID) async throws -> Void
+
 private struct DownloadCall: Sendable {
   let object: ObjectRow
   let location: ObjectLocation
@@ -1850,6 +1909,7 @@ private actor StubWorkbenchService: WorkbenchServing {
   private let bucketListHandler: BucketListHandler?
   private let listObjectsHandler: ListObjectsHandler?
   private let searchHandler: SearchHandler?
+  private let removeConnectionHandler: RemoveConnectionHandler?
   private let downloadHandler: DownloadHandler?
   private(set) var bucketListCallCount = 0
   private(set) var lastObjectLocation: ObjectLocation?
@@ -1862,13 +1922,15 @@ private actor StubWorkbenchService: WorkbenchServing {
     searchHandler: SearchHandler? = nil,
     downloadHandler: DownloadHandler? = nil,
     listObjectsHandler: ListObjectsHandler? = nil,
-    bucketListHandler: BucketListHandler? = nil
+    bucketListHandler: BucketListHandler? = nil,
+    removeConnectionHandler: RemoveConnectionHandler? = nil
   ) {
     self.connections = connections
     self.listObjectsResult = listObjectsResult
     self.listObjectsHandler = listObjectsHandler
     self.bucketListHandler = bucketListHandler
     self.searchHandler = searchHandler
+    self.removeConnectionHandler = removeConnectionHandler
     self.downloadHandler = downloadHandler
   }
 
@@ -1882,7 +1944,9 @@ private actor StubWorkbenchService: WorkbenchServing {
   func duplicateConnection(id: UUID) async throws -> ConnectionRow {
     throw S3ServiceError.unsupported("Not used by this test.")
   }
-  func removeConnection(id: UUID) async throws {}
+  func removeConnection(id: UUID) async throws {
+    if let removeConnectionHandler { try await removeConnectionHandler(id) }
+  }
   func testConnection(_ draft: ConnectionDraft) async throws {}
   func listBuckets(connectionID: UUID) async throws -> [BucketRow] {
     bucketListCallCount += 1
@@ -2257,6 +2321,20 @@ private final class InMemoryCredentialStore: CredentialStore, @unchecked Sendabl
 
   func remove(for connectionID: UUID) throws {
     lock.withLock { values[connectionID] = nil }
+  }
+}
+
+private struct FailingCredentialStore: CredentialStore {
+  func credentials(for connectionID: UUID) throws -> S3Credentials? {
+    throw S3ServiceError.service("Credentials should not be read.")
+  }
+
+  func save(_ credentials: S3Credentials, for connectionID: UUID) throws {
+    throw S3ServiceError.service("Credentials should not be saved.")
+  }
+
+  func remove(for connectionID: UUID) throws {
+    throw S3ServiceError.service("Credentials should not be removed.")
   }
 }
 

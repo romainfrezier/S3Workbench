@@ -12,23 +12,11 @@ enum SigV4Presigner {
         contentType: String?,
         now: Date = Date()
     ) throws -> S3PresignedRequest {
-        guard var components = URLComponents(url: profile.endpoint, resolvingAgainstBaseURL: false),
-              let endpointHost = components.host else {
-            throw S3ServiceError.invalidConfiguration("Endpoint URL is invalid.")
-        }
-        components.host = endpointHost.lowercased()
-        let pathStyle = try usesPathStyle(profile.addressingStyle, bucket: bucket, endpointHost: endpointHost)
-        if !pathStyle { components.host = "\(bucket).\(endpointHost.lowercased())" }
-
-        let basePath = components.percentEncodedPath == "/"
-            ? ""
-            : components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        var pathSegments: [String] = []
-        if !basePath.isEmpty { pathSegments.append(basePath) }
-        if pathStyle { pathSegments.append(uriEncode(bucket, encodeSlash: true)) }
-        pathSegments.append(uriEncode(key, encodeSlash: false))
-        let canonicalPath = "/" + pathSegments.joined(separator: "/")
-        components.percentEncodedPath = canonicalPath
+        var (components, canonicalPath) = try S3ObjectURLBuilder.components(
+            profile: profile,
+            bucket: bucket,
+            key: key
+        )
 
         let timestamp = dateFormatter("yyyyMMdd'T'HHmmss'Z'").string(from: now)
         let dateStamp = dateFormatter("yyyyMMdd").string(from: now)
@@ -81,26 +69,6 @@ enum SigV4Presigner {
         )
     }
 
-    private static func usesPathStyle(
-        _ style: S3AddressingStyle,
-        bucket: String,
-        endpointHost: String
-    ) throws -> Bool {
-        switch style {
-        case .path:
-            return true
-        case .virtualHosted:
-            guard !isIPAddress(endpointHost), isDNSCompatibleBucket(bucket) else {
-                throw S3ServiceError.invalidConfiguration(
-                    "Virtual-hosted addressing requires a DNS-compatible bucket and hostname."
-                )
-            }
-            return false
-        case .automatic:
-            return true
-        }
-    }
-
     private static func canonicalHost(from components: URLComponents) throws -> String {
         guard let rawHost = components.host else {
             throw S3ServiceError.invalidConfiguration("Endpoint host is invalid.")
@@ -112,7 +80,10 @@ enum SigV4Presigner {
 
     private static func canonicalQueryString(_ items: [(String, String)]) -> String {
         let encoded = items.map { item in
-            (uriEncode(item.0, encodeSlash: true), uriEncode(item.1, encodeSlash: true))
+            (
+                S3ObjectURLBuilder.uriEncode(item.0, encodeSlash: true),
+                S3ObjectURLBuilder.uriEncode(item.1, encodeSlash: true)
+            )
         }
         let sorted = encoded.sorted { lhs, rhs in
             lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 < rhs.0
@@ -131,34 +102,8 @@ enum SigV4Presigner {
         Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key)))
     }
 
-    private static func uriEncode(_ value: String, encodeSlash: Bool) -> String {
-        let unreserved = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~".utf8)
-        return value.utf8.map { byte in
-            if unreserved.contains(byte) || (!encodeSlash && byte == 0x2F) {
-                return String(UnicodeScalar(byte))
-            }
-            return String(format: "%%%02X", byte)
-        }.joined()
-    }
-
     private static func canonicalHeaderValue(_ value: String) -> String {
         value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-    }
-
-    private static func isIPAddress(_ host: String) -> Bool {
-        if host.contains(":") { return true }
-        let segments = host.split(separator: ".")
-        return segments.count == 4 && segments.allSatisfy {
-            Int($0).map { (0...255).contains($0) } == true
-        }
-    }
-
-    private static func isDNSCompatibleBucket(_ bucket: String) -> Bool {
-        guard (3...63).contains(bucket.count), let first = bucket.first, let last = bucket.last,
-              first.isLetter || first.isNumber, last.isLetter || last.isNumber,
-              !bucket.contains(".."), !bucket.contains(".-"), !bucket.contains("-.") else { return false }
-        return bucket.allSatisfy { $0.isLowercase || $0.isNumber || $0 == "." || $0 == "-" }
-            && !isIPAddress(bucket)
     }
 
     private static func dateFormatter(_ format: String) -> DateFormatter {

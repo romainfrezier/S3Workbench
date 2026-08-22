@@ -24,6 +24,9 @@ final class WorkbenchViewModel {
   private(set) var searchWasCancelled = false
   var continuationToken: String?
   var transfers: [TransferRow] = []
+  var connectionIndexSummaries: [ConnectionIndexSummary] = []
+  var clearingConnectionIndexIDs = Set<UUID>()
+  var indexSettingsErrorMessage: String?
   var isLoadingConnections = false
   var isLoadingBuckets = false
   var isLoadingObjects = false
@@ -116,6 +119,7 @@ final class WorkbenchViewModel {
       connections = try await service.loadConnections()
       selectedConnectionID = selectedConnectionID ?? connections.first?.id
       await refreshTransfers()
+      await loadSearchIndexSummaries()
     } catch {
       errorMessage = error.localizedDescription
     }
@@ -461,6 +465,7 @@ final class WorkbenchViewModel {
         connections.append(saved)
       }
       selectedConnectionID = saved.id
+      await loadSearchIndexSummaries()
       await reloadConnection()
       return true
     } catch {
@@ -469,14 +474,20 @@ final class WorkbenchViewModel {
     }
   }
 
-  func removeConnection(_ connection: ConnectionRow) async {
-    await perform {
+  @discardableResult
+  func removeConnection(_ connection: ConnectionRow) async -> Bool {
+    do {
       try await service.removeConnection(id: connection.id)
       connections.removeAll { $0.id == connection.id }
+      connectionIndexSummaries.removeAll { $0.connectionID == connection.id }
       if selectedConnectionID == connection.id {
         selectedConnectionID = connections.first?.id
         await reloadConnection()
       }
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
     }
   }
 
@@ -609,14 +620,49 @@ final class WorkbenchViewModel {
     }
   }
 
-  func presignedURL() async -> URL? {
+  func presignedURL(expiresIn: Duration = .seconds(3_600)) async -> URL? {
     guard let location, let selectedObject, !selectedObject.isPrefix else { return nil }
     do {
       return try await service.presignedURL(
-        for: selectedObject, at: location, expiresIn: .seconds(3_600))
+        for: selectedObject, at: location, expiresIn: expiresIn)
     } catch {
       errorMessage = error.localizedDescription
       return nil
+    }
+  }
+
+  func unsignedURL() async -> URL? {
+    guard let location, let selectedObject, !selectedObject.isPrefix else { return nil }
+    do {
+      return try await service.unsignedURL(for: selectedObject, at: location)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func loadSearchIndexSummaries() async {
+    do {
+      connectionIndexSummaries = try await service.searchIndexSummaries()
+      indexSettingsErrorMessage = nil
+    } catch {
+      indexSettingsErrorMessage = error.localizedDescription
+    }
+  }
+
+  func clearSearchIndex(connectionID: UUID) async {
+    guard clearingConnectionIndexIDs.insert(connectionID).inserted else { return }
+    defer { clearingConnectionIndexIDs.remove(connectionID) }
+    do {
+      try await service.clearSearchIndex(connectionID: connectionID)
+      connectionIndexSummaries.removeAll { $0.connectionID == connectionID }
+      if selectedConnectionID == connectionID {
+        searchIndexSnapshot = nil
+        isBuildingSearchIndex = false
+      }
+      indexSettingsErrorMessage = nil
+    } catch {
+      indexSettingsErrorMessage = error.localizedDescription
     }
   }
 
