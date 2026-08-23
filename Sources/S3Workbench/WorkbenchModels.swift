@@ -38,7 +38,7 @@ struct ConnectionRow: Identifiable, Hashable, Sendable {
   var color: Color { Color(connectionHex: colorHex) }
 }
 
-struct ConnectionDraft: Identifiable, Sendable {
+struct ConnectionDraft: Identifiable, Equatable, Sendable {
   var id = UUID()
   var isExisting = false
   var name = ""
@@ -229,6 +229,22 @@ struct ObjectSearchPage: Sendable {
   let objects: [ObjectRow]
   let scannedObjectCount: Int
   let continuationToken: String?
+  let indexSnapshot: ObjectIndexSnapshot?
+  let isBuildingIndex: Bool
+
+  init(
+    objects: [ObjectRow],
+    scannedObjectCount: Int,
+    continuationToken: String?,
+    indexSnapshot: ObjectIndexSnapshot? = nil,
+    isBuildingIndex: Bool = false
+  ) {
+    self.objects = objects
+    self.scannedObjectCount = scannedObjectCount
+    self.continuationToken = continuationToken
+    self.indexSnapshot = indexSnapshot
+    self.isBuildingIndex = isBuildingIndex
+  }
 }
 
 struct ObjectDetails: Sendable {
@@ -239,6 +255,15 @@ struct ObjectDetails: Sendable {
   let storageClass: String?
   let metadata: [String: String]
   let headers: [String: String]
+}
+
+struct ConnectionIndexSummary: Identifiable, Equatable, Sendable {
+  var id: UUID { connectionID }
+  let connectionID: UUID
+  let scopeCount: Int
+  let objectCount: Int
+  let indexedAt: Date?
+  let isStale: Bool
 }
 
 enum TransferState: String, Sendable {
@@ -302,14 +327,16 @@ protocol WorkbenchServing: Sendable {
   func listObjects(at location: ObjectLocation, continuationToken: String?) async throws
     -> ObjectPage
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
   ) async throws -> ObjectSearchPage
+  func cancelObjectSearch(at location: ObjectLocation) async
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails
   func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws
   func download(
     objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
     collisionPolicy: CollisionPolicy
   ) async throws
+  func download(object: ObjectRow, from location: ObjectLocation, to destination: URL) async throws
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws
   func move(
     object: ObjectRow, from location: ObjectLocation, toKey: String,
@@ -317,10 +344,22 @@ protocol WorkbenchServing: Sendable {
   ) async throws
   func presignedURL(for object: ObjectRow, at location: ObjectLocation, expiresIn: Duration)
     async throws -> URL
+  func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL
+  func searchIndexSummaries() async throws -> [ConnectionIndexSummary]
+  func clearSearchIndex(connectionID: UUID) async throws
   func downloadForPreview(object: ObjectRow, at location: ObjectLocation) async throws -> URL
   func transfers() async -> [TransferRow]
   func cancelTransfer(id: UUID) async
   func retryTransfer(id: UUID) async
+}
+
+extension WorkbenchServing {
+  func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL {
+    throw WorkbenchUIError.serviceUnavailable
+  }
+
+  func searchIndexSummaries() async throws -> [ConnectionIndexSummary] { [] }
+  func clearSearchIndex(connectionID: UUID) async throws {}
 }
 
 actor PlaceholderWorkbenchService: WorkbenchServing {
@@ -355,8 +394,9 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
     -> ObjectPage
   { throw WorkbenchUIError.serviceUnavailable }
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
   ) async throws -> ObjectSearchPage { throw WorkbenchUIError.serviceUnavailable }
+  func cancelObjectSearch(at location: ObjectLocation) async {}
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {
     throw WorkbenchUIError.serviceUnavailable
   }
@@ -368,6 +408,9 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
     collisionPolicy: CollisionPolicy
   ) async throws
   { throw WorkbenchUIError.serviceUnavailable }
+  func download(object: ObjectRow, from location: ObjectLocation, to destination: URL) async throws {
+    throw WorkbenchUIError.serviceUnavailable
+  }
   func delete(objects: [ObjectRow], from location: ObjectLocation) async throws {
     throw WorkbenchUIError.serviceUnavailable
   }
@@ -380,6 +423,11 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
   func presignedURL(for object: ObjectRow, at location: ObjectLocation, expiresIn: Duration)
     async throws -> URL
   { throw WorkbenchUIError.serviceUnavailable }
+  func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL {
+    throw WorkbenchUIError.serviceUnavailable
+  }
+  func searchIndexSummaries() async throws -> [ConnectionIndexSummary] { [] }
+  func clearSearchIndex(connectionID: UUID) async throws {}
   func downloadForPreview(object: ObjectRow, at location: ObjectLocation) async throws -> URL {
     throw WorkbenchUIError.serviceUnavailable
   }
@@ -417,12 +465,18 @@ extension Color {
 
 enum WorkbenchUIError: LocalizedError {
   case invalidConnection
+  case invalidExportFilename
   case serviceUnavailable
+  case staleFilePromise
 
   var errorDescription: String? {
     switch self {
     case .invalidConnection: "The connection settings are invalid."
+    case .invalidExportFilename:
+      "This object name can’t be exported as a macOS file. Rename the object first."
     case .serviceUnavailable: "The S3 service is not configured yet."
+    case .staleFilePromise:
+      "The location or selection changed before the drop completed. Drag the object again."
     }
   }
 }

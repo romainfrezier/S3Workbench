@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import S3WorkbenchCore
@@ -16,11 +17,16 @@ final class WorkbenchViewModel {
   var searchQuery = ""
   private(set) var activeSearchQuery: String?
   private(set) var searchScannedObjectCount = 0
+  private(set) var searchIndexSnapshot: ObjectIndexSnapshot?
+  private(set) var isBuildingSearchIndex = false
   private(set) var searchErrorMessage: String?
   private(set) var searchErrorSecondaryMessage: String?
   private(set) var searchWasCancelled = false
   var continuationToken: String?
   var transfers: [TransferRow] = []
+  var connectionIndexSummaries: [ConnectionIndexSummary] = []
+  var clearingConnectionIndexIDs = Set<UUID>()
+  var indexSettingsErrorMessage: String?
   var isLoadingConnections = false
   var isLoadingBuckets = false
   var isLoadingObjects = false
@@ -34,6 +40,7 @@ final class WorkbenchViewModel {
   private(set) var objectErrorSecondaryMessage: String?
   private(set) var paginationErrorMessage: String?
   private(set) var paginationErrorSecondaryMessage: String?
+  private(set) var filePromiseErrorMessage: String?
   var previewURL: URL? {
     didSet {
       guard oldValue != previewURL, let oldValue, isManagedPreview(oldValue) else { return }
@@ -50,11 +57,13 @@ final class WorkbenchViewModel {
   private var objectLoadGeneration = UUID()
   private var activeSearchContext: ObjectSearchContext?
   private var searchTask: Task<Void, Never>?
+  private var seenObjectContinuationTokens = Set<String>()
   private var nextSearchContinuationToken: String?
   private var seenSearchContinuationTokens = Set<String>()
   private var replacesSearchResultsOnNextPage = false
   private var pendingSearchObjects: [ObjectRow] = []
   private var pendingSearchScannedObjectCount = 0
+  private var pendingSearchIndexSnapshot: ObjectIndexSnapshot?
   private var visibleLoadingIndicators = Set<LoadingIndicator>()
   @ObservationIgnored private var loadingIndicatorTasks: [LoadingIndicator: Task<Void, Never>] = [:]
   @ObservationIgnored private var loadingIndicatorIDs: [LoadingIndicator: UUID] = [:]
@@ -110,6 +119,7 @@ final class WorkbenchViewModel {
       connections = try await service.loadConnections()
       selectedConnectionID = selectedConnectionID ?? connections.first?.id
       await refreshTransfers()
+      await loadSearchIndexSummaries()
     } catch {
       errorMessage = error.localizedDescription
     }
@@ -233,6 +243,7 @@ final class WorkbenchViewModel {
     objectLoadGeneration = generation
     invalidateLoadingIndicator(.pagination)
     isLoadingMore = false
+    seenObjectContinuationTokens = []
     guard let location else { return nil }
     let context = ObjectLoadContext(location: location)
     let previousContinuationToken = loadedObjectContext == context ? continuationToken : nil
@@ -269,6 +280,14 @@ final class WorkbenchViewModel {
   }
 
   func startSearch() async {
+    await startSearch(refreshIndex: false)
+  }
+
+  func refreshSearchIndex() async {
+    await startSearch(refreshIndex: true)
+  }
+
+  private func startSearch(refreshIndex: Bool) async {
     let query = searchQuery
     guard !query.isEmpty, let location else {
       if isSearchMode { await reloadObjects(clearSearchQuery: false) }
@@ -278,8 +297,14 @@ final class WorkbenchViewModel {
     let refreshesCurrentSearch = activeSearchContext?.location == location
       && activeSearchQuery?.utf8.elementsEqual(query.utf8) == true
     let previousScannedObjectCount = searchScannedObjectCount
+    let previousIndexSnapshot = searchIndexSnapshot
     resetSearch(clearQuery: false)
-    let context = ObjectSearchContext(id: UUID(), location: location, query: query)
+    let context = ObjectSearchContext(
+      id: UUID(),
+      location: location,
+      query: query,
+      refreshIndex: refreshIndex
+    )
     activeSearchContext = context
     activeSearchQuery = query
     if !refreshesCurrentSearch { objects = [] }
@@ -291,12 +316,14 @@ final class WorkbenchViewModel {
     paginationErrorMessage = nil
     paginationErrorSecondaryMessage = nil
     searchScannedObjectCount = refreshesCurrentSearch ? previousScannedObjectCount : 0
+    searchIndexSnapshot = refreshesCurrentSearch ? previousIndexSnapshot : nil
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
     replacesSearchResultsOnNextPage = refreshesCurrentSearch
     pendingSearchObjects = []
     pendingSearchScannedObjectCount = 0
+    pendingSearchIndexSnapshot = nil
     isSearching = true
     startLoadingIndicator(.search, id: context.id)
 
@@ -317,7 +344,7 @@ final class WorkbenchViewModel {
 
   func cancelSearch() {
     guard isSearching else { return }
-    searchTask?.cancel()
+    cancelRunningSearch()
     isSearching = false
     searchWasCancelled = true
     if let context = activeSearchContext {
@@ -330,8 +357,21 @@ final class WorkbenchViewModel {
       location == context.location, searchQuery.utf8.elementsEqual(context.query.utf8),
       searchErrorMessage != nil || searchWasCancelled
     else { return }
+    if isBuildingSearchIndex {
+      nextSearchContinuationToken = nil
+      seenSearchContinuationTokens = []
+      replacesSearchResultsOnNextPage = true
+      pendingSearchObjects = []
+      pendingSearchScannedObjectCount = 0
+      pendingSearchIndexSnapshot = nil
+      isBuildingSearchIndex = false
+    }
     let retryContext = ObjectSearchContext(
-      id: UUID(), location: context.location, query: context.query)
+      id: UUID(),
+      location: context.location,
+      query: context.query,
+      refreshIndex: context.refreshIndex
+    )
     activeSearchContext = retryContext
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
@@ -357,17 +397,9 @@ final class WorkbenchViewModel {
       objectLoadGeneration == generation,
       location == expectedLocation
     else { return }
-    var seenTokens = Set<String>()
     while !objects.contains(where: { candidateIDs.contains($0.id) }),
-      let token = continuationToken
+      continuationToken != nil
     {
-      guard seenTokens.insert(token).inserted else {
-        let error = S3ServiceError.service(
-          "The server returned a repeated object pagination token.")
-        paginationErrorMessage = error.localizedDescription
-        paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
-        break
-      }
       guard await loadMore(), objectLoadGeneration == generation,
         location == expectedLocation
       else { return }
@@ -380,6 +412,10 @@ final class WorkbenchViewModel {
   @discardableResult
   func loadMore() async -> Bool {
     guard !isSearchMode, let location, let continuationToken, !isLoadingMore else {
+      return false
+    }
+    guard seenObjectContinuationTokens.insert(continuationToken).inserted else {
+      reportRepeatedPaginationToken()
       return false
     }
     let generation = objectLoadGeneration
@@ -402,6 +438,7 @@ final class WorkbenchViewModel {
       guard objectLoadGeneration == generation, self.location == location, !isSearchMode else {
         return false
       }
+      seenObjectContinuationTokens.remove(continuationToken)
       paginationErrorMessage = error.localizedDescription
       paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
       return false
@@ -428,6 +465,7 @@ final class WorkbenchViewModel {
         connections.append(saved)
       }
       selectedConnectionID = saved.id
+      await loadSearchIndexSummaries()
       await reloadConnection()
       return true
     } catch {
@@ -436,14 +474,20 @@ final class WorkbenchViewModel {
     }
   }
 
-  func removeConnection(_ connection: ConnectionRow) async {
-    await perform {
+  @discardableResult
+  func removeConnection(_ connection: ConnectionRow) async -> Bool {
+    do {
       try await service.removeConnection(id: connection.id)
       connections.removeAll { $0.id == connection.id }
+      connectionIndexSummaries.removeAll { $0.connectionID == connection.id }
       if selectedConnectionID == connection.id {
         selectedConnectionID = connections.first?.id
         await reloadConnection()
       }
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
     }
   }
 
@@ -479,6 +523,72 @@ final class WorkbenchViewModel {
     }
   }
 
+  func prepareFilePromiseDrag(for object: ObjectRow) {
+    guard let currentObject = objects.first(where: {
+      $0.id == object.id && $0.key.utf8.elementsEqual(object.key.utf8)
+    }), !currentObject.isPrefix, !selectedObjectIDs.contains(currentObject.id)
+    else { return }
+    select(currentObject)
+  }
+
+  func filePromiseProviders(for object: ObjectRow) -> [NSFilePromiseProvider] {
+    filePromises(for: object).map { promise in
+      ObjectFilePromiseProvider.make(for: promise) { [weak self] promise, destination in
+        guard let self else { throw WorkbenchUIError.staleFilePromise }
+        try await self.fulfillFilePromise(promise, to: destination)
+      }
+    }
+  }
+
+  func filePromises(for object: ObjectRow) -> [ObjectFilePromise] {
+    guard let location,
+      let currentObject = objects.first(where: {
+        $0.id == object.id && $0.key.utf8.elementsEqual(object.key.utf8)
+      }), !currentObject.isPrefix
+    else {
+      return []
+    }
+    if !selectedObjectIDs.contains(currentObject.id) { select(currentObject) }
+    let selectedObjects = selectedObjects
+    guard selectedObjects.count == selectedObjectIDs.count,
+      !selectedObjects.isEmpty, !selectedObjects.contains(where: \.isPrefix)
+    else {
+      return []
+    }
+    do {
+      return try selectedObjects.map {
+        try ObjectFilePromise(
+          location: location, object: $0, selectionIDs: selectedObjectIDs)
+      }
+    } catch {
+      filePromiseErrorMessage = error.localizedDescription
+      return []
+    }
+  }
+
+  func fulfillFilePromise(_ promise: ObjectFilePromise, to destination: URL) async throws {
+    do {
+      guard isCurrent(promise) else { throw WorkbenchUIError.staleFilePromise }
+      try Task.checkCancellation()
+      try await service.download(
+        object: promise.object, from: promise.location, to: destination)
+      try Task.checkCancellation()
+      guard isCurrent(promise), FileManager.default.fileExists(atPath: destination.path) else {
+        try? FileManager.default.removeItem(at: destination)
+        throw WorkbenchUIError.staleFilePromise
+      }
+    } catch {
+      if !(error is CancellationError), (error as? S3ServiceError) != .cancelled {
+        filePromiseErrorMessage = error.localizedDescription
+      }
+      throw error
+    }
+  }
+
+  func dismissFilePromiseError() {
+    filePromiseErrorMessage = nil
+  }
+
   func deleteSelected() async {
     guard let location, !selectedObjects.isEmpty else { return }
     await perform {
@@ -510,14 +620,49 @@ final class WorkbenchViewModel {
     }
   }
 
-  func presignedURL() async -> URL? {
+  func presignedURL(expiresIn: Duration = .seconds(3_600)) async -> URL? {
     guard let location, let selectedObject, !selectedObject.isPrefix else { return nil }
     do {
       return try await service.presignedURL(
-        for: selectedObject, at: location, expiresIn: .seconds(3_600))
+        for: selectedObject, at: location, expiresIn: expiresIn)
     } catch {
       errorMessage = error.localizedDescription
       return nil
+    }
+  }
+
+  func unsignedURL() async -> URL? {
+    guard let location, let selectedObject, !selectedObject.isPrefix else { return nil }
+    do {
+      return try await service.unsignedURL(for: selectedObject, at: location)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func loadSearchIndexSummaries() async {
+    do {
+      connectionIndexSummaries = try await service.searchIndexSummaries()
+      indexSettingsErrorMessage = nil
+    } catch {
+      indexSettingsErrorMessage = error.localizedDescription
+    }
+  }
+
+  func clearSearchIndex(connectionID: UUID) async {
+    guard clearingConnectionIndexIDs.insert(connectionID).inserted else { return }
+    defer { clearingConnectionIndexIDs.remove(connectionID) }
+    do {
+      try await service.clearSearchIndex(connectionID: connectionID)
+      connectionIndexSummaries.removeAll { $0.connectionID == connectionID }
+      if selectedConnectionID == connectionID {
+        searchIndexSnapshot = nil
+        isBuildingSearchIndex = false
+      }
+      indexSettingsErrorMessage = nil
+    } catch {
+      indexSettingsErrorMessage = error.localizedDescription
     }
   }
 
@@ -547,6 +692,15 @@ final class WorkbenchViewModel {
     url.path.contains("/S3Workbench-Previews/")
   }
 
+  private func isCurrent(_ promise: ObjectFilePromise) -> Bool {
+    location == promise.location && selectedObjectIDs == promise.selectionIDs
+      && objects.contains {
+        $0.id == promise.object.id
+          && $0.key.utf8.elementsEqual(promise.object.key.utf8)
+          && !$0.isPrefix
+      }
+  }
+
   private func runSearch(_ context: ObjectSearchContext) async {
     do {
       repeat {
@@ -554,7 +708,8 @@ final class WorkbenchViewModel {
         let page = try await service.searchObjects(
           at: context.location,
           query: context.query,
-          continuationToken: nextSearchContinuationToken
+          continuationToken: nextSearchContinuationToken,
+          refreshIndex: context.refreshIndex && nextSearchContinuationToken == nil
         )
         try Task.checkCancellation()
         guard isActive(context), isSearching else {
@@ -570,11 +725,14 @@ final class WorkbenchViewModel {
         if replacesSearchResultsOnNextPage {
           pendingSearchObjects.append(contentsOf: page.objects)
           pendingSearchScannedObjectCount += page.scannedObjectCount
+          if let snapshot = page.indexSnapshot { pendingSearchIndexSnapshot = snapshot }
         } else {
           objects.append(contentsOf: page.objects)
           searchScannedObjectCount += page.scannedObjectCount
+          if let snapshot = page.indexSnapshot { searchIndexSnapshot = snapshot }
         }
         nextSearchContinuationToken = page.continuationToken
+        isBuildingSearchIndex = page.isBuildingIndex
       } while nextSearchContinuationToken != nil
 
       guard isActive(context) else {
@@ -584,11 +742,14 @@ final class WorkbenchViewModel {
       if replacesSearchResultsOnNextPage {
         objects = pendingSearchObjects
         searchScannedObjectCount = pendingSearchScannedObjectCount
+        searchIndexSnapshot = pendingSearchIndexSnapshot
         replacesSearchResultsOnNextPage = false
         pendingSearchObjects = []
         pendingSearchScannedObjectCount = 0
+        pendingSearchIndexSnapshot = nil
       }
       isSearching = false
+      isBuildingSearchIndex = false
       searchTask = nil
       stopLoadingIndicator(.search, id: context.id)
     } catch {
@@ -596,6 +757,7 @@ final class WorkbenchViewModel {
         discardStaleSearch(context)
         return
       }
+      await service.cancelObjectSearch(at: context.location)
       isSearching = false
       searchTask = nil
       stopLoadingIndicator(.search, id: context.id)
@@ -620,10 +782,12 @@ final class WorkbenchViewModel {
     activeSearchContext = nil
     activeSearchQuery = nil
     isSearching = false
+    isBuildingSearchIndex = false
     objects = []
     selectedObjectIDs = []
     objectDetails = nil
     searchScannedObjectCount = 0
+    searchIndexSnapshot = nil
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
@@ -632,18 +796,21 @@ final class WorkbenchViewModel {
     replacesSearchResultsOnNextPage = false
     pendingSearchObjects = []
     pendingSearchScannedObjectCount = 0
+    pendingSearchIndexSnapshot = nil
   }
 
   private func resetSearch(clearQuery: Bool) {
     if let context = activeSearchContext {
       stopLoadingIndicator(.search, id: context.id)
     }
-    searchTask?.cancel()
+    cancelRunningSearch()
     searchTask = nil
     activeSearchContext = nil
     activeSearchQuery = nil
     isSearching = false
+    isBuildingSearchIndex = false
     searchScannedObjectCount = 0
+    searchIndexSnapshot = nil
     searchErrorMessage = nil
     searchErrorSecondaryMessage = nil
     searchWasCancelled = false
@@ -652,7 +819,16 @@ final class WorkbenchViewModel {
     replacesSearchResultsOnNextPage = false
     pendingSearchObjects = []
     pendingSearchScannedObjectCount = 0
+    pendingSearchIndexSnapshot = nil
     if clearQuery { searchQuery = "" }
+  }
+
+  private func cancelRunningSearch() {
+    guard let searchTask else { return }
+    searchTask.cancel()
+    if let location = activeSearchContext?.location {
+      Task { await service.cancelObjectSearch(at: location) }
+    }
   }
 
   private func parentPrefix(of key: String) -> String {
@@ -678,6 +854,13 @@ final class WorkbenchViewModel {
     default:
       "The cloud returned a plot twist."
     }
+  }
+
+  private func reportRepeatedPaginationToken() {
+    let error = S3ServiceError.service(
+      "The server returned a repeated object pagination token.")
+    paginationErrorMessage = error.localizedDescription
+    paginationErrorSecondaryMessage = serviceFailureCopy(for: error)
   }
 
   @discardableResult
@@ -733,9 +916,11 @@ private struct ObjectSearchContext: Equatable {
   let id: UUID
   let location: ObjectLocation
   let query: String
+  let refreshIndex: Bool
 
   static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.id == rhs.id && lhs.location == rhs.location
       && lhs.query.utf8.elementsEqual(rhs.query.utf8)
+      && lhs.refreshIndex == rhs.refreshIndex
   }
 }

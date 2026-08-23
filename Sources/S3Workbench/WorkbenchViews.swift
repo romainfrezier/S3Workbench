@@ -5,8 +5,11 @@ import UniformTypeIdentifiers
 
 struct WorkbenchRootView: View {
   @Bindable var model: WorkbenchViewModel
+  @Bindable var preferences: AppPreferences
+  @Bindable var settingsNavigation: SettingsNavigationModel
 
-  @State private var connectionDraft: ConnectionDraft?
+  @Environment(\.openSettings) private var openSettings
+
   @State private var isInspectorPresented = true
   @State private var isTransferPopoverPresented = false
   @State private var isUploadPresented = false
@@ -18,6 +21,7 @@ struct WorkbenchRootView: View {
   @State private var pendingDownloadDirectory: URL?
   @State private var isUploadCollisionPresented = false
   @State private var isDownloadCollisionPresented = false
+  @FocusState private var isSearchFocused: Bool
 
   var body: some View {
     NavigationSplitView {
@@ -33,16 +37,10 @@ struct WorkbenchRootView: View {
     .navigationSplitViewStyle(.balanced)
     .toolbar { toolbarContent }
     .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Search below this prefix")
+    .searchFocused($isSearchFocused)
     .onSubmit(of: .search) { Task { await model.startSearch() } }
     .onChange(of: model.searchQuery) { _, _ in
       Task { await model.searchQueryDidChange() }
-    }
-    .sheet(item: $connectionDraft) { draft in
-      ConnectionEditorView(
-        draft: draft,
-        save: { await model.saveConnection($0) },
-        test: { try await model.testConnection($0) }
-      )
     }
     .sheet(
       isPresented: Binding(
@@ -63,8 +61,7 @@ struct WorkbenchRootView: View {
     .fileImporter(isPresented: $isDownloadDestinationPresented, allowedContentTypes: [.folder]) {
       result in
       if case .success(let url) = result {
-        pendingDownloadDirectory = url
-        isDownloadCollisionPresented = true
+        requestDownload(to: url)
       }
     }
     .confirmationDialog(
@@ -126,6 +123,7 @@ struct WorkbenchRootView: View {
       Text(model.errorMessage ?? "Unknown error")
     }
     .quickLookPreview($model.previewURL)
+    .focusedSceneValue(\.workbenchCommandContext, commandContext)
     .task { await model.start() }
     .task(id: model.selectedConnectionID) {
       guard model.selectedConnectionID != nil else { return }
@@ -154,7 +152,7 @@ struct WorkbenchRootView: View {
           }
           .tag(connection.id)
           .contextMenu {
-            Button("Edit…") { connectionDraft = ConnectionDraft(connection: connection) }
+            Button("Connection Settings…") { openConnectionSettings(connection) }
             Button("Duplicate") { Task { await model.duplicateConnection(connection) } }
             Divider()
             Button("Delete", role: .destructive) {
@@ -168,7 +166,7 @@ struct WorkbenchRootView: View {
     .safeAreaInset(edge: .bottom) {
       HStack {
         Button {
-          connectionDraft = ConnectionDraft()
+          openNewConnectionSettings()
         } label: {
           Label("Add Connection", systemImage: "plus")
         }
@@ -192,7 +190,7 @@ struct WorkbenchRootView: View {
         } description: {
           Text("Add an S3-compatible endpoint to begin.")
         } actions: {
-          Button("Add Connection") { connectionDraft = ConnectionDraft() }
+          Button("Add Connection") { openNewConnectionSettings() }
         }
       }
     }
@@ -209,9 +207,14 @@ struct WorkbenchRootView: View {
     } else {
       ObjectBrowserView(
         model: model,
+        preferences: preferences,
         requestUpload: { isUploadPresented = true },
+        requestDownload: { selection in
+          model.selectedObjectIDs = selection
+          perform(.download)
+        },
         queueUpload: requestUpload,
-        requestDelete: { isDeleteConfirmationPresented = true },
+        requestDelete: { perform(.delete) },
         requestRename: { renameKey = $0 }
       )
     }
@@ -221,17 +224,17 @@ struct WorkbenchRootView: View {
   private var toolbarContent: some ToolbarContent {
     ToolbarItemGroup(placement: .navigation) {
       Button {
-        Task { await model.goBack() }
+        perform(.back)
       } label: {
         Label("Back", systemImage: "chevron.left")
       }
-      .disabled(!model.canGoBack)
+      .disabled(!commandAvailability.isEnabled(.back))
       Button {
-        Task { await model.goForward() }
+        perform(.forward)
       } label: {
         Label("Forward", systemImage: "chevron.right")
       }
-      .disabled(!model.canGoForward)
+      .disabled(!commandAvailability.isEnabled(.forward))
     }
 
     ToolbarItem(placement: .principal) {
@@ -240,27 +243,17 @@ struct WorkbenchRootView: View {
 
     ToolbarItemGroup(placement: .primaryAction) {
       Button {
-        isUploadPresented = true
+        perform(.upload)
       } label: {
         Label("Upload", systemImage: "square.and.arrow.up")
       }
-      .keyboardShortcut("u", modifiers: .command)
-      .disabled(model.location == nil)
+      .disabled(!commandAvailability.isEnabled(.upload))
       Button {
-        Task {
-          if model.selectedBucket == nil {
-            await model.reloadConnection()
-          } else if model.isSearchMode {
-            await model.startSearch()
-          } else {
-            await model.reloadObjects()
-          }
-        }
+        perform(.refresh)
       } label: {
         Label("Refresh", systemImage: "arrow.clockwise")
       }
-      .keyboardShortcut("r", modifiers: .command)
-      .disabled(model.selectedConnection == nil)
+      .disabled(!commandAvailability.isEnabled(.refresh))
 
       Button {
         isTransferPopoverPresented.toggle()
@@ -273,49 +266,144 @@ struct WorkbenchRootView: View {
       }
 
       Button {
-        isInspectorPresented.toggle()
+        perform(.toggleInspector)
       } label: {
         Label("Inspector", systemImage: "sidebar.right")
       }
-      .keyboardShortcut("i", modifiers: [.command, .option])
+      .disabled(!commandAvailability.isEnabled(.toggleInspector))
 
       Menu {
-        Button("Quick Look") { Task { await model.previewSelected() } }
-          .keyboardShortcut(.space, modifiers: [])
-          .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
+        Button("Quick Look") { perform(.quickLook) }
+          .disabled(!commandAvailability.isEnabled(.quickLook))
         if model.isSearchMode {
           Button("Reveal in Prefix") { Task { await model.revealSelectedInPrefix() } }
             .disabled(model.selectedObject == nil)
         }
-        Button("Download…") { isDownloadDestinationPresented = true }
-          .disabled(
-            model.selectedObjects.isEmpty || model.selectedObjects.contains(where: \.isPrefix))
-        Button("Copy Presigned URL") { copyPresignedURL() }
+        Button("Download…") { perform(.download) }
+          .disabled(!commandAvailability.isEnabled(.download))
+        Button("Copy Unsigned URL") { copyUnsignedURL() }
+          .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
+        Button("Copy Signed URL") { copySignedURL() }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
         Button("Rename…") { renameKey = model.selectedObject?.key }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
         Divider()
-        Button("Delete…", role: .destructive) { isDeleteConfirmationPresented = true }
-          .disabled(
-            model.selectedObjects.isEmpty || model.selectedObjects.contains(where: \.isPrefix))
+        Button("Delete…", role: .destructive) { perform(.delete) }
+          .disabled(!commandAvailability.isEnabled(.delete))
       } label: {
         Label("More", systemImage: "ellipsis.circle")
       }
     }
   }
 
-  private func copyPresignedURL() {
-    Task {
-      guard let url = await model.presignedURL() else { return }
-      NSPasteboard.general.clearContents()
-      NSPasteboard.general.setString(url.absoluteString, forType: .string)
+  private var isModalPresented: Bool {
+    renameKey != nil || connectionToDelete != nil
+      || isUploadPresented || isDownloadDestinationPresented
+      || isUploadCollisionPresented || isDownloadCollisionPresented
+      || isDeleteConfirmationPresented || model.errorMessage != nil || model.previewURL != nil
+  }
+
+  private var commandAvailability: WorkbenchCommandAvailability {
+    WorkbenchCommandAvailability(model: model, isModalPresented: isModalPresented)
+  }
+
+  private var commandContext: WorkbenchCommandContext {
+    WorkbenchCommandContext(availability: commandAvailability, perform: perform)
+  }
+
+  private func perform(_ command: WorkbenchCommand) {
+    guard commandAvailability.isEnabled(command) else { return }
+    switch command {
+    case .search:
+      isSearchFocused = true
+    case .download:
+      beginDownload()
+    case .upload:
+      isUploadPresented = true
+    case .refresh:
+      Task { await refresh() }
+    case .back:
+      Task { await model.goBack() }
+    case .forward:
+      Task { await model.goForward() }
+    case .quickLook:
+      Task { await model.previewSelected() }
+    case .toggleInspector:
+      isInspectorPresented.toggle()
+    case .delete:
+      isDeleteConfirmationPresented = true
     }
+  }
+
+  private func refresh() async {
+    if model.selectedBucket == nil {
+      await model.reloadConnection()
+    } else if model.isSearchMode {
+      await model.startSearch()
+    } else {
+      await model.reloadObjects()
+    }
+  }
+
+  private func copyUnsignedURL() {
+    Task {
+      guard let url = await model.unsignedURL() else { return }
+      copyToPasteboard(url)
+    }
+  }
+
+  private func copySignedURL() {
+    Task {
+      guard let url = await model.presignedURL(expiresIn: preferences.signedURLLifetime.duration)
+      else { return }
+      copyToPasteboard(url)
+    }
+  }
+
+  private func copyToPasteboard(_ url: URL) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(url.absoluteString, forType: .string)
   }
 
   private func requestUpload(_ urls: [URL]) {
     guard !urls.isEmpty else { return }
     pendingUploadURLs = urls
-    isUploadCollisionPresented = true
+    if preferences.uploadCollision == .keepBoth {
+      performUpload(.keepBoth)
+    } else {
+      isUploadCollisionPresented = true
+    }
+  }
+
+  private func beginDownload() {
+    let downloadsDirectories = FileManager.default.urls(
+      for: .downloadsDirectory,
+      in: .userDomainMask
+    )
+    if let directory = preferences.downloadDestination.directory(from: downloadsDirectories) {
+      requestDownload(to: directory)
+    } else {
+      isDownloadDestinationPresented = true
+    }
+  }
+
+  private func requestDownload(to directory: URL) {
+    pendingDownloadDirectory = directory
+    if preferences.downloadCollision == .keepBoth {
+      performDownload(.keepBoth)
+    } else {
+      isDownloadCollisionPresented = true
+    }
+  }
+
+  private func openConnectionSettings(_ connection: ConnectionRow) {
+    settingsNavigation.request(.connection(connection.id), connections: model.connections)
+    openSettings()
+  }
+
+  private func openNewConnectionSettings() {
+    settingsNavigation.request(.newConnection(UUID()), connections: model.connections)
+    openSettings()
   }
 
   private func performUpload(_ collisionPolicy: CollisionPolicy) {
@@ -414,7 +502,9 @@ private struct BucketBrowserView: View {
 
 private struct ObjectBrowserView: View {
   @Bindable var model: WorkbenchViewModel
+  @Bindable var preferences: AppPreferences
   let requestUpload: () -> Void
+  let requestDownload: (Set<ObjectRow.ID>) -> Void
   let queueUpload: ([URL]) -> Void
   let requestDelete: () -> Void
   let requestRename: (String) -> Void
@@ -429,10 +519,20 @@ private struct ObjectBrowserView: View {
   var body: some View {
     Table(displayedObjects, selection: $model.selectedObjectIDs, sortOrder: $sortOrder) {
       TableColumn("Name", sortUsing: ObjectSortComparator(column: .name)) { object in
-        Label(
-          object.displayName,
-          systemImage: object.isPrefix ? "folder.fill" : symbol(for: object.displayName)
-        )
+        if object.isPrefix {
+          Label(object.displayName, systemImage: "folder.fill")
+        } else {
+          HStack(spacing: 4) {
+            ObjectFilePromiseDragSource(
+              symbolName: symbol(for: object.displayName),
+              prepareSelection: { model.prepareFilePromiseDrag(for: object) },
+              makeProviders: { model.filePromiseProviders(for: object) }
+            )
+            .frame(width: 16, height: 16)
+            .help("Drag to Finder")
+            Text(object.displayName)
+          }
+        }
       }
       .width(min: 220, ideal: 420)
       if model.isSearchMode {
@@ -483,10 +583,20 @@ private struct ObjectBrowserView: View {
           }
         }
         if !object.isPrefix {
-          Button("Copy Presigned URL") {
+          Button("Copy Unsigned URL") {
             Task {
               model.select(object)
-              guard let url = await model.presignedURL() else { return }
+              guard let url = await model.unsignedURL() else { return }
+              NSPasteboard.general.clearContents()
+              NSPasteboard.general.setString(url.absoluteString, forType: .string)
+            }
+          }
+          Button("Copy Signed URL") {
+            Task {
+              model.select(object)
+              guard let url = await model.presignedURL(
+                expiresIn: preferences.signedURLLifetime.duration
+              ) else { return }
               NSPasteboard.general.clearContents()
               NSPasteboard.general.setString(url.absoluteString, forType: .string)
             }
@@ -501,7 +611,8 @@ private struct ObjectBrowserView: View {
         !model.objects.contains(where: { selection.contains($0.id) && $0.isPrefix })
       {
         Divider()
-        Button("Delete", role: .destructive) {
+        Button("Download…") { requestDownload(selection) }
+        Button("Delete…", role: .destructive) {
           model.selectedObjectIDs = selection
           requestDelete()
         }
@@ -515,6 +626,15 @@ private struct ObjectBrowserView: View {
       } else {
         Task { await model.previewSelected() }
       }
+    }
+    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+      geometry.contentSize.height - geometry.visibleRect.maxY
+    } action: { _, distanceFromBottom in
+      guard distanceFromBottom < 200, !model.isSearchMode,
+        model.continuationToken != nil, !model.isLoadingMore,
+        model.paginationErrorMessage == nil
+      else { return }
+      Task { await model.loadMore() }
     }
     .overlay {
       if model.isSearching, model.objects.isEmpty {
@@ -585,12 +705,18 @@ private struct ObjectBrowserView: View {
             Text("Nothing here. Impressively lightweight.")
           }
         } actions: {
-          if !model.isSearchMode { Button("Upload Files") { requestUpload() } }
+          if model.isSearchMode, model.searchIndexSnapshot != nil {
+            Button("Refresh Index") { Task { await model.refreshSearchIndex() } }
+          } else if !model.isSearchMode {
+            Button("Upload Files") { requestUpload() }
+          }
         }
       }
     }
     .safeAreaInset(edge: .top) {
-      if let error = model.searchErrorMessage, !model.objects.isEmpty {
+      if let error = model.filePromiseErrorMessage {
+        DismissibleErrorBanner(message: error) { model.dismissFilePromiseError() }
+      } else if let error = model.searchErrorMessage, !model.objects.isEmpty {
         RefreshErrorBanner(
           message: error,
           secondaryMessage: model.searchErrorSecondaryMessage
@@ -630,19 +756,10 @@ private struct ObjectBrowserView: View {
           message: error,
           secondaryMessage: model.paginationErrorSecondaryMessage
         ) { Task { await model.loadMore() } }
-      } else if !model.isSearchMode, model.continuationToken != nil {
-        Button { Task { await model.loadMore() } } label: {
-          HStack(spacing: 8) {
-            if model.isPaginationLoadingIndicatorVisible {
-              ProgressView().controlSize(.small)
-            }
-            Text(model.isPaginationLoadingIndicatorVisible ? "Loading…" : "Load More")
-          }
-        }
-          .disabled(model.isLoadingMore)
-          .padding(8)
-          .frame(maxWidth: .infinity)
-          .background(.bar)
+      } else if !model.isSearchMode, model.isLoadingMore,
+        model.isPaginationLoadingIndicatorVisible
+      {
+        RefreshProgressBanner(title: "Loading more objects…")
       }
     }
     .navigationTitle(model.selectedBucket ?? "Objects")
@@ -666,12 +783,27 @@ private struct SearchStatusBar: View {
     HStack(spacing: 8) {
       if model.isSearchLoadingIndicatorVisible { ProgressView().controlSize(.small) }
       VStack(alignment: .leading, spacing: 2) {
-        Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
-          .font(.callout)
-          .accessibilityLabel(
-            "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
-          )
-          .accessibilityAddTraits(.updatesFrequently)
+        if let snapshot = model.searchIndexSnapshot {
+          Text("\(snapshot.objectCount) indexed · \(model.searchMatchCount) matches")
+            .font(.callout)
+            .accessibilityLabel(
+              "Indexed \(snapshot.objectCount) objects, found \(model.searchMatchCount) matches"
+            )
+            .accessibilityAddTraits(.updatesFrequently)
+          HStack(spacing: 4) {
+            Text(snapshot.isStale ? "Index may be stale · Updated" : "Index updated")
+            Text(snapshot.indexedAt, style: .relative)
+          }
+          .font(.caption)
+          .foregroundStyle(snapshot.isStale ? .orange : .secondary)
+        } else {
+          Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
+            .font(.callout)
+            .accessibilityLabel(
+              "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
+            )
+            .accessibilityAddTraits(.updatesFrequently)
+        }
         if model.searchWasCancelled {
           Text("Search cancelled. The objects remain mysterious.")
             .font(.caption)
@@ -685,6 +817,9 @@ private struct SearchStatusBar: View {
           .keyboardShortcut(.cancelAction)
       } else if model.searchWasCancelled {
         Button("Retry") { Task { await model.retrySearch() } }
+      } else if model.searchIndexSnapshot != nil {
+        Button("Refresh Index") { Task { await model.refreshSearchIndex() } }
+          .help("Rescan the accessible S3 prefix and replace the local index")
       }
     }
     .padding(.horizontal, 12)
@@ -697,13 +832,22 @@ private struct SearchCountLabel: View {
   @Bindable var model: WorkbenchViewModel
 
   var body: some View {
-    Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      .accessibilityLabel(
-        "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
-      )
-      .accessibilityAddTraits(.updatesFrequently)
+    Group {
+      if let snapshot = model.searchIndexSnapshot {
+        Text("\(snapshot.objectCount) indexed · \(model.searchMatchCount) matches")
+          .accessibilityLabel(
+            "Indexed \(snapshot.objectCount) objects, found \(model.searchMatchCount) matches"
+          )
+      } else {
+        Text("\(model.searchScannedObjectCount) scanned · \(model.searchMatchCount) matches")
+          .accessibilityLabel(
+            "Scanned \(model.searchScannedObjectCount) objects, found \(model.searchMatchCount) matches"
+          )
+      }
+    }
+    .font(.caption)
+    .foregroundStyle(.secondary)
+    .accessibilityAddTraits(.updatesFrequently)
   }
 }
 
@@ -769,37 +913,80 @@ private struct RefreshErrorBanner: View {
   }
 }
 
+private struct DismissibleErrorBanner: View {
+  let message: String
+  let dismiss: () -> Void
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+      Text(message).font(.callout)
+      Spacer()
+      Button("Dismiss", action: dismiss)
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
+    .background(.bar)
+    .accessibilityElement(children: .combine)
+  }
+}
+
 private struct BreadcrumbView: View {
   @Bindable var model: WorkbenchViewModel
 
   var body: some View {
-    HStack(spacing: 4) {
-      if let bucket = model.selectedBucket {
-        Button(bucket) {
-          Task {
-            model.navigate(to: model.accessRootPrefix)
-            await model.reloadObjects()
-          }
-        }
-        .buttonStyle(.plain)
-        ForEach(prefixComponents.indices, id: \.self) { index in
-          Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-          Button(prefixComponents[index]) {
-            let destination = model.accessRootPrefix
-              + prefixComponents.prefix(index + 1).joined(separator: "/") + "/"
+    let components = prefixComponents
+
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 2) {
+        if model.selectedBucket != nil {
+          Button {
             Task {
-              model.navigate(to: destination)
+              model.navigate(to: model.accessRootPrefix)
               await model.reloadObjects()
             }
+          } label: {
+            Image(systemName: "house")
           }
           .buttonStyle(.plain)
+          .foregroundStyle(.primary)
+          .padding(.horizontal, 6)
+          .padding(.vertical, 3)
+          .accessibilityLabel("Bucket root")
+          .help("Go to bucket root")
+
+          ForEach(Array(components.enumerated()), id: \.offset) { index, component in
+            Image(systemName: "chevron.right")
+              .font(.caption2.weight(.semibold))
+              .foregroundStyle(.tertiary)
+              .accessibilityHidden(true)
+            Button(component) {
+              let rootPrefix = model.accessRootPrefix
+              let path = components.prefix(index + 1).joined(separator: "/")
+              let destination = rootPrefix + path + "/"
+              Task {
+                model.navigate(to: destination)
+                await model.reloadObjects()
+              }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+          }
+        } else {
+          Text(model.selectedConnection?.name ?? "S3 Workbench")
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
         }
-      } else {
-        Text(model.selectedConnection?.name ?? "S3 Workbench")
       }
+      .font(.subheadline.weight(.medium))
+      .fixedSize(horizontal: true, vertical: false)
+      .padding(.horizontal, 4)
+      .padding(.vertical, 3)
     }
-    .lineLimit(1)
-    .truncationMode(.head)
+    .frame(maxWidth: 620)
+    .accessibilityElement(children: .contain)
   }
 
   private var prefixComponents: [String] {
@@ -828,7 +1015,6 @@ private struct ObjectInspectorView: View {
                 .textSelection(.enabled)
               if !object.isPrefix {
                 Button("Quick Look") { Task { await model.previewSelected() } }
-                  .keyboardShortcut(.space, modifiers: [])
               }
             }
             .frame(maxWidth: .infinity)
@@ -872,7 +1058,6 @@ private struct ObjectInspectorView: View {
           description: Text("Select an object to inspect its metadata."))
       }
     }
-    .navigationTitle("Inspector")
   }
 }
 

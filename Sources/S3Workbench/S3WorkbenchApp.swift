@@ -3,16 +3,32 @@ import SwiftUI
 @main
 struct S3WorkbenchApp: App {
   @State private var model = WorkbenchViewModel(service: AppServices.makeWorkbenchService())
+  @State private var preferences = AppPreferences()
+  @State private var settingsNavigation = SettingsNavigationModel()
 
   var body: some Scene {
     WindowGroup {
-      WorkbenchRootView(model: model)
+      WorkbenchRootView(
+        model: model,
+        preferences: preferences,
+        settingsNavigation: settingsNavigation
+      )
         .frame(minWidth: 900, minHeight: 560)
+        .preferredColorScheme(preferences.appearance.colorScheme)
     }
     .defaultSize(width: 1280, height: 800)
     .commands {
       SidebarCommands()
-      InspectorCommands()
+      WorkbenchCommands()
+    }
+
+    Settings {
+      WorkbenchSettingsView(
+        preferences: preferences,
+        navigation: settingsNavigation,
+        model: model
+      )
+      .preferredColorScheme(preferences.appearance.colorScheme)
     }
   }
 }
