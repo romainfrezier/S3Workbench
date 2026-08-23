@@ -140,6 +140,14 @@ S3Workbench is an early public release. Maintainer-approved work is tracked in
 Questions and ideas that are not yet ready for implementation belong in
 [GitHub Discussions](https://github.com/romainfrezier/S3Workbench/discussions).
 
+## Support
+
+<p>
+  <a href="https://buymeacoffee.com/romainfrezier">
+    <img src="Sources/S3Workbench/Resources/bmc-button.png" width="150" alt="Buy me a coffee">
+  </a>
+</p>
+
 ## Deliberate non-goals
 
 S3Workbench intentionally remains an object browser rather than a storage
