@@ -935,33 +935,62 @@ private struct BreadcrumbView: View {
   @Bindable var model: WorkbenchViewModel
 
   var body: some View {
-    HStack(spacing: 4) {
-      if let bucket = model.selectedBucket {
-        Button(bucket) {
-          Task {
-            model.navigate(to: model.accessRootPrefix)
-            await model.reloadObjects()
-          }
-        }
-        .buttonStyle(.plain)
-        ForEach(prefixComponents.indices, id: \.self) { index in
-          Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-          Button(prefixComponents[index]) {
-            let destination = model.accessRootPrefix
-              + prefixComponents.prefix(index + 1).joined(separator: "/") + "/"
+    let components = prefixComponents
+
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 2) {
+        if model.selectedBucket != nil {
+          Button {
             Task {
-              model.navigate(to: destination)
+              model.navigate(to: model.accessRootPrefix)
               await model.reloadObjects()
             }
+          } label: {
+            Image(systemName: "house")
           }
           .buttonStyle(.plain)
+          .foregroundStyle(.primary)
+          .padding(.horizontal, 6)
+          .padding(.vertical, 3)
+          .accessibilityLabel("Bucket root")
+          .help("Go to bucket root")
+
+          ForEach(Array(components.enumerated()), id: \.offset) { index, component in
+            Image(systemName: "chevron.right")
+              .font(.caption2.weight(.semibold))
+              .foregroundStyle(.tertiary)
+              .accessibilityHidden(true)
+            Button(component) {
+              let rootPrefix = model.accessRootPrefix
+              let path = components.prefix(index + 1).joined(separator: "/")
+              let destination = rootPrefix + path + "/"
+              Task {
+                model.navigate(to: destination)
+                await model.reloadObjects()
+              }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+          }
+        } else {
+          Text(model.selectedConnection?.name ?? "S3 Workbench")
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
         }
-      } else {
-        Text(model.selectedConnection?.name ?? "S3 Workbench")
       }
+      .font(.subheadline.weight(.medium))
+      .fixedSize(horizontal: true, vertical: false)
+      .padding(.horizontal, 4)
+      .padding(.vertical, 3)
     }
-    .lineLimit(1)
-    .truncationMode(.head)
+    .frame(maxWidth: 620)
+    .background(.thinMaterial, in: Capsule())
+    .overlay {
+      Capsule().strokeBorder(.quaternary, lineWidth: 0.5)
+    }
+    .accessibilityElement(children: .contain)
   }
 
   private var prefixComponents: [String] {
