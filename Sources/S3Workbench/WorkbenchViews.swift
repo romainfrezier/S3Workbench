@@ -986,10 +986,6 @@ private struct BreadcrumbView: View {
       .padding(.vertical, 3)
     }
     .frame(maxWidth: 620)
-    .background(.thinMaterial, in: Capsule())
-    .overlay {
-      Capsule().strokeBorder(.quaternary, lineWidth: 0.5)
-    }
     .accessibilityElement(children: .contain)
   }
 
