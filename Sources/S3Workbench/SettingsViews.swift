@@ -179,7 +179,7 @@ struct WorkbenchSettingsView: View {
   }
 
   private var connectionsTab: some View {
-    NavigationSplitView {
+    HStack(spacing: 0) {
       List(selection: connectionSelection) {
         ForEach(model.connections) { connection in
           Label {
@@ -218,11 +218,14 @@ struct WorkbenchSettingsView: View {
         }
         .padding(10)
       }
-      .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
-    } detail: {
+      .frame(width: 220)
+
+      Divider()
+
       detail
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    .navigationSplitViewStyle(.balanced)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
   private var tabSelection: Binding<SettingsTab> {
