@@ -564,6 +564,11 @@ private struct ObjectBrowserView: View {
       }
       .width(min: 100, ideal: 130)
     }
+    .onKeyPress(.space) {
+      guard let object = model.selectedObject, !object.isPrefix else { return .ignored }
+      Task { await model.previewSelected() }
+      return .handled
+    }
     .contextMenu(forSelectionType: ObjectRow.ID.self) { selection in
       if selection.count == 1,
         let object = model.objects.first(where: { selection.contains($0.id) })
