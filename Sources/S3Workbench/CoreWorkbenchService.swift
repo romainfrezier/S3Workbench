@@ -103,9 +103,18 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   func loadConnections() async throws -> [ConnectionRow] {
-    try await connectionStore.load()
-      .map(ConnectionRow.init)
-      .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    try await connectionStore.load().map(ConnectionRow.init)
+  }
+
+  func reorderConnections(ids: [UUID]) async throws -> [ConnectionRow] {
+    let profiles = try await connectionStore.load()
+    var seen = Set<UUID>()
+    let requestedIDs = ids.filter { seen.insert($0).inserted }
+    let profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+    let reordered = requestedIDs.compactMap { profilesByID[$0] }
+      + profiles.filter { !seen.contains($0.id) }
+    try await connectionStore.save(reordered)
+    return reordered.map(ConnectionRow.init)
   }
 
   func saveConnection(_ draft: ConnectionDraft) async throws -> ConnectionRow {

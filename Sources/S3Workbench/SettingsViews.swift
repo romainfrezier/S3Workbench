@@ -106,6 +106,9 @@ struct WorkbenchSettingsView: View {
                 .disabled(navigation.hasUnsavedChanges)
             }
           }
+          .onMove { offsets, destination in
+            Task { await model.moveConnections(fromOffsets: offsets, toOffset: destination) }
+          }
           if case .newConnection(let id) = navigation.destination {
             Label("New Connection", systemImage: "externaldrive.badge.plus")
               .tag(SettingsDestination.newConnection(id))
@@ -416,8 +419,6 @@ private struct SettingsHelpView: View {
 }
 
 private struct SettingsAboutView: View {
-  private let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
-
   var body: some View {
     VStack(spacing: 12) {
       Image(systemName: "externaldrive.connected.to.line.below")
@@ -427,7 +428,7 @@ private struct SettingsAboutView: View {
       Text("A native macOS browser for S3-compatible object storage")
         .foregroundStyle(.secondary)
         .multilineTextAlignment(.center)
-      Text("Version \(version)").font(.caption)
+      Text(versionText).font(.caption)
       Link(destination: SettingsLinks.buyMeACoffee) {
         Label("Buy Me a Coffee", systemImage: "cup.and.saucer.fill")
       }
@@ -438,6 +439,20 @@ private struct SettingsAboutView: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .padding(24)
     .navigationTitle("About")
+  }
+
+  private var versionText: String {
+    let info = Bundle.main.infoDictionary
+    let version = info?["CFBundleShortVersionString"] as? String
+    let build = info?["CFBundleVersion"] as? String
+    switch (version, build) {
+    case let (version?, build?) where !build.isEmpty:
+      return "Version \(version) (\(build))"
+    case let (version?, _):
+      return "Version \(version)"
+    default:
+      return "Development build"
+    }
   }
 }
 
