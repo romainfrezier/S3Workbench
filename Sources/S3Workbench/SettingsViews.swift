@@ -205,7 +205,7 @@ struct WorkbenchSettingsView: View {
             .tag(SettingsDestination.newConnection(id))
         }
       }
-      .listStyle(.sidebar)
+      .listStyle(.inset)
       .safeAreaInset(edge: .bottom) {
         HStack {
           Button {
