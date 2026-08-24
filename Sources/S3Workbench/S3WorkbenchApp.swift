@@ -19,7 +19,7 @@ struct S3WorkbenchApp: App {
     .defaultSize(width: 1280, height: 800)
     .commands {
       SidebarCommands()
-      WorkbenchCommands()
+      WorkbenchCommands(settingsNavigation: settingsNavigation)
     }
 
     Settings {

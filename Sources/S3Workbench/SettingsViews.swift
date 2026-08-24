@@ -4,6 +4,7 @@ import SwiftUI
 
 enum SettingsDestination: Hashable {
   case general
+  case connections
   case advanced
   case help
   case about
@@ -11,10 +12,29 @@ enum SettingsDestination: Hashable {
   case newConnection(UUID)
 }
 
+enum SettingsTab: String, Hashable {
+  case general
+  case connections
+  case advanced
+  case help
+  case about
+
+  var destination: SettingsDestination {
+    switch self {
+    case .general: .general
+    case .connections: .connections
+    case .advanced: .advanced
+    case .help: .help
+    case .about: .about
+    }
+  }
+}
+
 @MainActor
 @Observable
 final class SettingsNavigationModel {
   var destination: SettingsDestination? = .general
+  var selectedTab: SettingsTab = .general
   var draft: ConnectionDraft?
   var originalDraft: ConnectionDraft?
   var pendingDestination: SettingsDestination?
@@ -27,6 +47,13 @@ final class SettingsNavigationModel {
 
   func request(_ next: SettingsDestination, connections: [ConnectionRow]) {
     guard next != destination else { return }
+    if next == .connections,
+      case .connection = destination,
+      !hasUnsavedChanges
+    {
+      selectedTab = .connections
+      return
+    }
     if hasUnsavedChanges {
       pendingDestination = next
       isUnsavedConfirmationPresented = true
@@ -37,10 +64,17 @@ final class SettingsNavigationModel {
 
   func activate(_ next: SettingsDestination, connections: [ConnectionRow]) {
     destination = next
+    switch next {
+    case .general: selectedTab = .general
+    case .connections, .connection, .newConnection: selectedTab = .connections
+    case .advanced: selectedTab = .advanced
+    case .help: selectedTab = .help
+    case .about: selectedTab = .about
+    }
     pendingDestination = nil
     isUnsavedConfirmationPresented = false
     switch next {
-    case .general, .advanced, .help, .about:
+    case .general, .connections, .advanced, .help, .about:
       draft = nil
       originalDraft = nil
     case .connection(let id):
@@ -80,68 +114,28 @@ struct WorkbenchSettingsView: View {
   @State private var connectionToDelete: ConnectionRow?
 
   var body: some View {
-    NavigationSplitView {
-      List(selection: selection) {
-        Section {
-          Label("General", systemImage: "gearshape")
-            .tag(SettingsDestination.general)
-          Label("Advanced", systemImage: "slider.horizontal.3")
-            .tag(SettingsDestination.advanced)
-        }
+    TabView(selection: tabSelection) {
+      AppSettingsView(preferences: preferences)
+        .tabItem { Label("General", systemImage: "gearshape") }
+        .tag(SettingsTab.general)
 
-        Section("Connections") {
-          ForEach(model.connections) { connection in
-            Label {
-              Text(connection.name)
-            } icon: {
-              Image(systemName: "circle.fill")
-                .font(.caption)
-                .foregroundStyle(connection.color)
-            }
-            .tag(SettingsDestination.connection(connection.id))
-            .contextMenu {
-              Button("Duplicate") { duplicate(connection) }
-                .disabled(navigation.hasUnsavedChanges)
-              Button("Delete", role: .destructive) { connectionToDelete = connection }
-                .disabled(navigation.hasUnsavedChanges)
-            }
-          }
-          .onMove { offsets, destination in
-            Task { await model.moveConnections(fromOffsets: offsets, toOffset: destination) }
-          }
-          if case .newConnection(let id) = navigation.destination {
-            Label("New Connection", systemImage: "externaldrive.badge.plus")
-              .tag(SettingsDestination.newConnection(id))
-          }
-        }
+      connectionsTab
+        .tabItem { Label("Connections", systemImage: "externaldrive.connected.to.line.below") }
+        .tag(SettingsTab.connections)
 
-        Section {
-          Label("Help", systemImage: "questionmark.circle")
-            .tag(SettingsDestination.help)
-          Label("About", systemImage: "info.circle")
-            .tag(SettingsDestination.about)
-        }
-      }
-      .listStyle(.sidebar)
-      .navigationTitle("Settings")
-      .safeAreaInset(edge: .bottom) {
-        HStack {
-          Button {
-            navigation.request(.newConnection(UUID()), connections: model.connections)
-          } label: {
-            Label("Add Connection", systemImage: "plus")
-          }
-          .buttonStyle(.borderless)
-          Spacer()
-        }
-        .padding(10)
-      }
-      .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
-    } detail: {
-      detail
+      AdvancedSettingsView(model: model)
+        .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
+        .tag(SettingsTab.advanced)
+
+      SettingsHelpView()
+        .tabItem { Label("Help", systemImage: "questionmark.circle") }
+        .tag(SettingsTab.help)
+
+      SettingsAboutView()
+        .tabItem { Label("About", systemImage: "info.circle") }
+        .tag(SettingsTab.about)
     }
-    .navigationSplitViewStyle(.balanced)
-    .frame(width: 860, height: 660)
+    .frame(width: 760, height: 600)
     .task { await model.loadSearchIndexSummaries() }
     .safeAreaInset(edge: .top) {
       if let errorMessage = model.errorMessage {
@@ -184,9 +178,68 @@ struct WorkbenchSettingsView: View {
     }
   }
 
-  private var selection: Binding<SettingsDestination?> {
+  private var connectionsTab: some View {
+    NavigationSplitView {
+      List(selection: connectionSelection) {
+        ForEach(model.connections) { connection in
+          Label {
+            Text(connection.name)
+          } icon: {
+            Image(systemName: "circle.fill")
+              .font(.caption)
+              .foregroundStyle(connection.color)
+          }
+          .tag(SettingsDestination.connection(connection.id))
+          .contextMenu {
+            Button("Duplicate") { duplicate(connection) }
+              .disabled(navigation.hasUnsavedChanges)
+            Button("Delete", role: .destructive) { connectionToDelete = connection }
+              .disabled(navigation.hasUnsavedChanges)
+          }
+        }
+        .onMove { offsets, destination in
+          Task { await model.moveConnections(fromOffsets: offsets, toOffset: destination) }
+        }
+        if case .newConnection(let id) = navigation.destination {
+          Label("New Connection", systemImage: "externaldrive.badge.plus")
+            .tag(SettingsDestination.newConnection(id))
+        }
+      }
+      .listStyle(.sidebar)
+      .safeAreaInset(edge: .bottom) {
+        HStack {
+          Button {
+            navigation.request(.newConnection(UUID()), connections: model.connections)
+          } label: {
+            Label("Add Connection", systemImage: "plus")
+          }
+          .buttonStyle(.borderless)
+          Spacer()
+        }
+        .padding(10)
+      }
+      .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
+    } detail: {
+      detail
+    }
+    .navigationSplitViewStyle(.balanced)
+  }
+
+  private var tabSelection: Binding<SettingsTab> {
     Binding(
-      get: { navigation.destination },
+      get: { navigation.selectedTab },
+      set: { navigation.request($0.destination, connections: model.connections) }
+    )
+  }
+
+  private var connectionSelection: Binding<SettingsDestination?> {
+    Binding(
+      get: {
+        switch navigation.destination {
+        case .connection, .newConnection: navigation.destination
+        default: nil
+        }
+      },
       set: { if let value = $0 { navigation.request(value, connections: model.connections) } }
     )
   }
@@ -196,6 +249,8 @@ struct WorkbenchSettingsView: View {
     switch navigation.destination ?? .general {
     case .general:
       AppSettingsView(preferences: preferences)
+    case .connections:
+      ContentUnavailableView("Select a Connection", systemImage: "externaldrive")
     case .advanced:
       AdvancedSettingsView(model: model)
     case .help:
