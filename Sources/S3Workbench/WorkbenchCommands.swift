@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum WorkbenchCommand: CaseIterable, Hashable {
@@ -94,9 +95,22 @@ extension FocusedValues {
 }
 
 struct WorkbenchCommands: Commands {
+  let settingsNavigation: SettingsNavigationModel
+
   @FocusedValue(\.workbenchCommandContext) private var context
 
   var body: some Commands {
+    CommandGroup(replacing: .appInfo) {
+      Button("About S3Workbench") {
+        NSApp.orderFrontStandardAboutPanel(nil)
+      }
+    }
+    CommandGroup(replacing: .help) {
+      Button("S3Workbench Help") {
+        openHelp()
+      }
+      .keyboardShortcut("/", modifiers: [.command, .shift])
+    }
     CommandGroup(after: .saveItem) {
       commandButton(.download)
       commandButton(.upload)
@@ -126,5 +140,10 @@ struct WorkbenchCommands: Commands {
     }
     .keyboardShortcut(command.shortcut.key, modifiers: command.shortcut.modifiers)
     .disabled(context?.availability.isEnabled(command) != true)
+  }
+
+  private func openHelp() {
+    settingsNavigation.request(.help, connections: [])
+    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
   }
 }

@@ -70,17 +70,30 @@ import Testing
 
   navigation.activate(.connection(connection.id), connections: [connection])
   navigation.draft?.name = "Edited"
-  navigation.request(.app, connections: [connection])
+  navigation.request(.general, connections: [connection])
 
   #expect(navigation.destination == .connection(connection.id))
-  #expect(navigation.pendingDestination == .app)
+  #expect(navigation.pendingDestination == .general)
   #expect(navigation.isUnsavedConfirmationPresented)
 
   navigation.discardAndContinue(connections: [connection])
-  #expect(navigation.destination == .app)
+  #expect(navigation.destination == .general)
   #expect(navigation.draft == nil)
 
   let newConnectionID = UUID()
   navigation.activate(.newConnection(newConnectionID), connections: [connection])
   #expect(navigation.draft?.id == newConnectionID)
+}
+
+@MainActor
+@Test func settingsNavigationSupportsTopLevelPages() {
+  let navigation = SettingsNavigationModel()
+
+  navigation.activate(.advanced, connections: [])
+  #expect(navigation.destination == .advanced)
+  navigation.activate(.help, connections: [])
+  #expect(navigation.destination == .help)
+  navigation.activate(.about, connections: [])
+  #expect(navigation.destination == .about)
+  #expect(!navigation.hasUnsavedChanges)
 }

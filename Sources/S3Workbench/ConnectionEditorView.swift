@@ -4,13 +4,8 @@ import UniformTypeIdentifiers
 struct ConnectionSettingsForm: View {
   @Binding var draft: ConnectionDraft
   let testResult: Result<Void, Error>?
-  var indexSummary: ConnectionIndexSummary? = nil
-  var indexErrorMessage: String? = nil
-  var isClearingIndex = false
-  var clearIndex: (() -> Void)?
 
   @State private var isChoosingCA = false
-  @State private var isClearIndexConfirmationPresented = false
 
   var body: some View {
     Form {
@@ -97,40 +92,6 @@ struct ConnectionSettingsForm: View {
         }
       }
 
-      if draft.isExisting {
-        Section("Local Search Index") {
-          if let indexErrorMessage {
-            Label(indexErrorMessage, systemImage: "exclamationmark.triangle")
-              .foregroundStyle(.orange)
-          }
-          if let indexSummary {
-            LabeledContent("Objects", value: indexSummary.objectCount.formatted())
-            LabeledContent("Locations", value: indexSummary.scopeCount.formatted())
-            if let indexedAt = indexSummary.indexedAt {
-              LabeledContent("Last updated") {
-                Text(indexedAt, format: .dateTime.year().month().day().hour().minute())
-              }
-            }
-            if indexSummary.isStale {
-              Label("The index will be refreshed by the next search.", systemImage: "clock.arrow.circlepath")
-                .foregroundStyle(.secondary)
-            }
-            Button("Clear Index…", role: .destructive) {
-              isClearIndexConfirmationPresented = true
-            }
-            .disabled(isClearingIndex)
-          } else {
-            Text("No local search index is stored for this connection.")
-              .foregroundStyle(.secondary)
-          }
-          if isClearingIndex {
-            HStack {
-              ProgressView().controlSize(.small)
-              Text("Clearing local index…").foregroundStyle(.secondary)
-            }
-          }
-        }
-      }
     }
     .formStyle(.grouped)
     .onChange(of: draft.usesHTTPS) { wasHTTPS, usesHTTPS in
@@ -139,15 +100,6 @@ struct ConnectionSettingsForm: View {
     }
     .fileImporter(isPresented: $isChoosingCA, allowedContentTypes: [.x509Certificate]) { result in
       if case .success(let url) = result { draft.customCAURL = url }
-    }
-    .confirmationDialog(
-      "Clear this connection’s search index?",
-      isPresented: $isClearIndexConfirmationPresented,
-      titleVisibility: .visible
-    ) {
-      Button("Clear Index", role: .destructive) { clearIndex?() }
-    } message: {
-      Text("Only local searchable metadata is removed. The connection and remote objects are unchanged.")
     }
   }
 

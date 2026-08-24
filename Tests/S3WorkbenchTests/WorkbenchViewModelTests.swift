@@ -32,6 +32,21 @@ import Testing
 }
 
 @MainActor
+@Test func movingConnectionsKeepsTheRequestedOrder() async throws {
+  let first = restrictedConnection(id: UUID())
+  let second = restrictedConnection(id: UUID())
+  let third = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [first, second, third], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+
+  await model.start()
+  await model.moveConnections(fromOffsets: IndexSet(integer: 0), toOffset: 3)
+
+  #expect(model.connections.map(\.id) == [second.id, third.id, first.id])
+}
+
+@MainActor
 @Test func failedConnectionRemovalKeepsTheConnectionAndSelection() async {
   let connection = restrictedConnection(id: UUID())
   let service = StubWorkbenchService(
@@ -1904,7 +1919,7 @@ private typealias DownloadHandler = @Sendable (
 ) async throws -> Void
 
 private actor StubWorkbenchService: WorkbenchServing {
-  let connections: [ConnectionRow]
+  var connections: [ConnectionRow]
   private var listObjectsResult: Result<ObjectPage, Error>
   private let bucketListHandler: BucketListHandler?
   private let listObjectsHandler: ListObjectsHandler?
@@ -1935,6 +1950,11 @@ private actor StubWorkbenchService: WorkbenchServing {
   }
 
   func loadConnections() async throws -> [ConnectionRow] { connections }
+  func reorderConnections(ids: [UUID]) async throws -> [ConnectionRow] {
+    let byID = Dictionary(uniqueKeysWithValues: connections.map { ($0.id, $0) })
+    connections = ids.compactMap { byID[$0] }
+    return connections
+  }
   func setListObjectsResult(_ result: Result<ObjectPage, Error>) {
     listObjectsResult = result
   }
