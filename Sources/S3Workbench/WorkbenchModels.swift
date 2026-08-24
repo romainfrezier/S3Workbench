@@ -319,6 +319,7 @@ enum CollisionPolicy: String, CaseIterable, Identifiable, Sendable {
 
 protocol WorkbenchServing: Sendable {
   func loadConnections() async throws -> [ConnectionRow]
+  func reorderConnections(ids: [UUID]) async throws -> [ConnectionRow]
   func saveConnection(_ draft: ConnectionDraft) async throws -> ConnectionRow
   func duplicateConnection(id: UUID) async throws -> ConnectionRow
   func removeConnection(id: UUID) async throws
@@ -364,6 +365,7 @@ extension WorkbenchServing {
 
 actor PlaceholderWorkbenchService: WorkbenchServing {
   func loadConnections() async throws -> [ConnectionRow] { [] }
+  func reorderConnections(ids: [UUID]) async throws -> [ConnectionRow] { [] }
   func saveConnection(_ draft: ConnectionDraft) async throws -> ConnectionRow {
     guard draft.validationMessage == nil, let endpoint = draft.endpointURL else {
       throw WorkbenchUIError.invalidConnection

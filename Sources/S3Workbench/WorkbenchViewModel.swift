@@ -474,6 +474,16 @@ final class WorkbenchViewModel {
     }
   }
 
+  func moveConnections(fromOffsets: IndexSet, toOffset: Int) async {
+    var reordered = connections
+    reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+    do {
+      connections = try await service.reorderConnections(ids: reordered.map(\.id))
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
   @discardableResult
   func removeConnection(_ connection: ConnectionRow) async -> Bool {
     do {
@@ -495,7 +505,6 @@ final class WorkbenchViewModel {
     await perform {
       let copy = try await service.duplicateConnection(id: connection.id)
       connections.append(copy)
-      connections.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
       selectedConnectionID = copy.id
     }
   }

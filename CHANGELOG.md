@@ -2,6 +2,34 @@
 
 All notable changes to S3Workbench are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-08-24
+
+### Added
+
+- Native Settings tabs for General, Connections, Advanced, Help, and About.
+- Integrated Help content and an About page with the dynamic app version, project links, license, and Buy Me a Coffee support link.
+- Persistent drag-and-drop ordering for saved connections.
+- Explicit native Help and About menu actions, including the standard `Command-?` Help shortcut.
+
+### Changed
+
+- Moved local search index management into Advanced Settings with per-connection summaries and confirmation before clearing data.
+- Refined the Connections settings layout so its list starts below the shared native header.
+
+### Fixed
+
+- Restored Quick Look from the Space bar for a single selected object.
+
+## [0.5.0] - 2026-08-23
+
+### Added
+
+- Infinite object scrolling with local sorting preserved across loaded pages.
+- Persistent local indexing for complete recursive search without repeated S3 scans.
+- Native object and navigation commands with standard macOS keyboard shortcuts.
+- Dragging selected objects to Finder through streamed file promises.
+- Native application and per-connection settings.
+
 ## [0.4.0] - 2026-08-14
 
 ### Added
@@ -59,3 +87,5 @@ All notable changes to S3Workbench are documented here. The project follows [Sem
 [0.2.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.2.0
 [0.3.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.3.0
 [0.4.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.4.0
+[0.5.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.5.0
+[0.6.0]: https://github.com/romainfrezier/S3Workbench/releases/tag/v0.6.0

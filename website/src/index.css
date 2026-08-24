@@ -1,0 +1,6 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; --mono: "SF Mono", "Cascadia Code", ui-monospace, monospace; color: #eef7f5; background: #06171e; }
+html { scroll-behavior: smooth; }
+body { min-width: 320px; margin: 0; background: #06171e; }
+a, button { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid #62eee5; outline-offset: 4px; }
+::selection { color: #06171e; background: #62eee5; }
