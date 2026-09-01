@@ -47,7 +47,7 @@ jobs:
 
       - name: Build container
         if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./website
           file: ./website/Dockerfile
@@ -87,7 +87,7 @@ jobs:
             type=match,pattern=v(.*)-site,group=1
 
       - name: Build and push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./website
           file: ./website/Dockerfile
