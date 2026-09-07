@@ -6,6 +6,40 @@ import Testing
 @testable import S3Workbench
 
 @MainActor
+@Test func copyingObjectReferencesPreservesExactBytesAndBrowseState() async throws {
+  let service = StubWorkbenchService(connections: [], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.prefix = "current/"
+  let key = " leading/e\u{301}//雪 #?%/trailing "
+  let object = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  model.objects = [object]
+  model.select(object)
+  let pasteboard = NSPasteboard(name: NSPasteboard.Name("S3Workbench-Copy-\(UUID())"))
+  defer { pasteboard.releaseGlobally() }
+
+  model.copyObjectKey(to: pasteboard)
+  let copied = try #require(pasteboard.string(forType: .string))
+  #expect(Array(copied.utf8) == Array(key.utf8))
+  model.copyS3URI(to: pasteboard)
+  #expect(pasteboard.string(forType: .string) == S3ObjectURI.string(bucket: "bucket", key: key))
+  #expect(model.prefix == "current/")
+  #expect(model.selectedObjectIDs == [object.id])
+  #expect(await service.lastObjectLocation == nil)
+  #expect(await service.bucketListCallCount == 0)
+  #expect(await service.searchCalls.isEmpty)
+
+  let other = searchObject(id: "other", key: "other//file/")
+  model.copyObjectKey(other, to: pasteboard)
+  #expect(pasteboard.string(forType: .string) == other.key)
+  #expect(model.selectedObjectIDs == [object.id])
+  model.selectedObjectIDs = []
+  model.copyObjectKey(to: pasteboard)
+  #expect(pasteboard.string(forType: .string) == other.key)
+}
+
+@MainActor
 @Test func directAccessRootBypassesBucketListing() async throws {
   let connection = ConnectionRow(
     id: UUID(),
@@ -537,7 +571,7 @@ import Testing
   model.selectedObjectIDs = [first.id]
   #expect(
     routedCommands(for: model)
-      == browsingCommands.union([.download, .quickLook, .delete]))
+      == browsingCommands.union([.download, .quickLook, .copyObjectKey, .copyS3URI, .delete]))
 
   model.selectedObjectIDs = [first.id, second.id]
   #expect(routedCommands(for: model) == browsingCommands.union([.download, .delete]))

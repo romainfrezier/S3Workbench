@@ -620,6 +620,18 @@ final class WorkbenchViewModel {
     }
   }
 
+  func copyObjectKey(_ object: ObjectRow? = nil, to pasteboard: NSPasteboard = .general) {
+    guard let object = object ?? selectedObject, !object.isPrefix else { return }
+    pasteboard.clearContents()
+    pasteboard.setString(object.key, forType: .string)
+  }
+
+  func copyS3URI(_ object: ObjectRow? = nil, to pasteboard: NSPasteboard = .general) {
+    guard let location, let object = object ?? selectedObject, !object.isPrefix else { return }
+    pasteboard.clearContents()
+    pasteboard.setString(S3ObjectURI.string(bucket: location.bucket, key: object.key), forType: .string)
+  }
+
   func previewSelected() async {
     guard let location, let selectedObject, !selectedObject.isPrefix else { return }
     do {

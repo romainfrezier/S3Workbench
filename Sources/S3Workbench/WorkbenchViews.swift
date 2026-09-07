@@ -281,6 +281,10 @@ struct WorkbenchRootView: View {
         }
         Button("Download…") { perform(.download) }
           .disabled(!commandAvailability.isEnabled(.download))
+        Button("Copy Object Key") { perform(.copyObjectKey) }
+          .disabled(!commandAvailability.isEnabled(.copyObjectKey))
+        Button("Copy S3 URI") { perform(.copyS3URI) }
+          .disabled(!commandAvailability.isEnabled(.copyS3URI))
         Button("Copy Unsigned URL") { copyUnsignedURL() }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
         Button("Copy Signed URL") { copySignedURL() }
@@ -326,6 +330,10 @@ struct WorkbenchRootView: View {
       Task { await model.goBack() }
     case .forward:
       Task { await model.goForward() }
+    case .copyObjectKey:
+      model.copyObjectKey()
+    case .copyS3URI:
+      model.copyS3URI()
     case .quickLook:
       Task { await model.previewSelected() }
     case .toggleInspector:
@@ -588,6 +596,8 @@ private struct ObjectBrowserView: View {
           }
         }
         if !object.isPrefix {
+          Button("Copy Object Key") { model.copyObjectKey(object) }
+          Button("Copy S3 URI") { model.copyS3URI(object) }
           Button("Copy Unsigned URL") {
             Task {
               model.select(object)
