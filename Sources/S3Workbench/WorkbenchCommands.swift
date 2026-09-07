@@ -3,6 +3,7 @@ import SwiftUI
 
 enum WorkbenchCommand: CaseIterable, Hashable {
   case search
+  case goToLocation
   case download
   case upload
   case refresh
@@ -17,6 +18,7 @@ enum WorkbenchCommand: CaseIterable, Hashable {
   var title: String {
     switch self {
     case .search: "Search"
+    case .goToLocation: "Go to Location…"
     case .download: "Download…"
     case .upload: "Upload…"
     case .refresh: "Refresh"
@@ -33,6 +35,7 @@ enum WorkbenchCommand: CaseIterable, Hashable {
   var shortcut: KeyboardShortcut? {
     switch self {
     case .copyObjectKey, .copyS3URI: nil
+    case .goToLocation: KeyboardShortcut("g", modifiers: [.command, .shift])
     case .search: KeyboardShortcut("f", modifiers: .command)
     case .download: KeyboardShortcut("s", modifiers: .command)
     case .upload: KeyboardShortcut("u", modifiers: .command)
@@ -61,7 +64,7 @@ struct WorkbenchCommandAvailability: Equatable {
     var enabled: Set<WorkbenchCommand> = [.toggleInspector]
     if model.selectedConnection != nil { enabled.insert(.refresh) }
     if model.location != nil {
-      enabled.formUnion([.search, .upload])
+      enabled.formUnion([.search, .upload, .goToLocation])
       let selection = model.selectedObjects
       if !selection.isEmpty, !selection.contains(where: \.isPrefix) {
         enabled.formUnion([.download, .delete])
@@ -122,6 +125,7 @@ struct WorkbenchCommands: Commands {
     }
     CommandMenu("Navigate") {
       commandButton(.search)
+      commandButton(.goToLocation)
       Divider()
       commandButton(.back)
       commandButton(.forward)

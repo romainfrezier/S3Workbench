@@ -436,6 +436,7 @@ private struct SettingsHelpView: View {
         }
         settingsHelpSection("Shortcuts", systemImage: "command") {
           VStack(alignment: .leading, spacing: 6) {
+            settingsShortcut("⇧⌘G", "Go to an exact object key in the current bucket")
             settingsShortcut("Space", "Open Quick Look for the selected object")
             settingsShortcut("⌘,", "Open Settings")
             settingsShortcut("⌘⌥I", "Show or hide the inspector")

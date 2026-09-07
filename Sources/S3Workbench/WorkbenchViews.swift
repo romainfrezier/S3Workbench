@@ -12,6 +12,7 @@ struct WorkbenchRootView: View {
 
   @State private var isInspectorPresented = true
   @State private var isTransferPopoverPresented = false
+  @State private var isGoToLocationPresented = false
   @State private var isUploadPresented = false
   @State private var isDownloadDestinationPresented = false
   @State private var isDeleteConfirmationPresented = false
@@ -23,7 +24,7 @@ struct WorkbenchRootView: View {
   @State private var isDownloadCollisionPresented = false
   @FocusState private var isSearchFocused: Bool
 
-  var body: some View {
+  private var navigation: some View {
     NavigationSplitView {
       connectionSidebar
         .navigationSplitViewColumnWidth(min: 190, ideal: 230, max: 320)
@@ -35,6 +36,10 @@ struct WorkbenchRootView: View {
         }
     }
     .navigationSplitViewStyle(.balanced)
+  }
+
+  var body: some View {
+    navigation
     .toolbar { toolbarContent }
     .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Search below this prefix")
     .searchFocused($isSearchFocused)
@@ -42,6 +47,28 @@ struct WorkbenchRootView: View {
     .onChange(of: model.searchQuery) { _, _ in
       Task { await model.searchQueryDidChange() }
     }
+    .sheet(isPresented: $isGoToLocationPresented) {
+      GoToLocationView { key in
+        isGoToLocationPresented = false
+        Task { await model.goToObjectKey(key) }
+      }
+    }
+    .safeAreaInset(edge: .top) {
+      if model.isResolvingObjectKey {
+        HStack {
+          ProgressView().controlSize(.small)
+          Text("Finding object…")
+          Spacer()
+          Button("Cancel") { model.cancelKeyNavigation() }
+        }
+        .padding(10)
+        .background(.bar)
+      } else if let error = model.navigationErrorMessage {
+        DismissibleErrorBanner(message: error) { model.navigationErrorMessage = nil }
+      }
+    }
+    .onChange(of: model.location) { _, _ in model.cancelKeyNavigation() }
+    .onDisappear { model.cancelKeyNavigation() }
     .sheet(
       isPresented: Binding(
         get: { renameKey != nil },
@@ -301,7 +328,7 @@ struct WorkbenchRootView: View {
   }
 
   private var isModalPresented: Bool {
-    renameKey != nil || connectionToDelete != nil
+    isGoToLocationPresented || renameKey != nil || connectionToDelete != nil
       || isUploadPresented || isDownloadDestinationPresented
       || isUploadCollisionPresented || isDownloadCollisionPresented
       || isDeleteConfirmationPresented || model.errorMessage != nil || model.previewURL != nil
@@ -320,6 +347,10 @@ struct WorkbenchRootView: View {
     switch command {
     case .search:
       isSearchFocused = true
+    case .goToLocation:
+      model.cancelKeyNavigation()
+      model.navigationErrorMessage = nil
+      isGoToLocationPresented = true
     case .download:
       beginDownload()
     case .upload:

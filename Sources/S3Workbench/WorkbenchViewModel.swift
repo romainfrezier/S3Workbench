@@ -49,6 +49,10 @@ final class WorkbenchViewModel {
   }
   var history: [String] = [""]
   var historyIndex = 0
+  private(set) var isResolvingObjectKey = false
+  var navigationErrorMessage: String?
+  private var keyNavigationID: UUID?
+  private var keyNavigationTask: Task<Void, Never>?
 
   private let service: any WorkbenchServing
   private var loadedBucketConnectionID: UUID?
@@ -386,6 +390,116 @@ final class WorkbenchViewModel {
     await task.value
   }
 
+  func cancelKeyNavigation() {
+    keyNavigationTask?.cancel()
+    keyNavigationTask = nil
+    keyNavigationID = nil
+    isResolvingObjectKey = false
+  }
+
+  func goToObjectKey(_ key: String) async {
+    cancelKeyNavigation()
+    navigationErrorMessage = nil
+    guard let origin = location else { return }
+    guard !key.isEmpty else {
+      navigationErrorMessage = "Enter an object key."
+      return
+    }
+    guard key.utf8.starts(with: accessRootPrefix.utf8),
+      accessRoot == nil || accessRoot?.bucket == origin.bucket
+    else {
+      navigationErrorMessage = "This key is outside the connection’s access root."
+      return
+    }
+    let id = UUID()
+    keyNavigationID = id
+    isResolvingObjectKey = true
+    let generation = objectLoadGeneration
+    let searchID = activeSearchContext?.id
+    let destination = ObjectLocation(
+      connectionID: origin.connectionID, bucket: origin.bucket, prefix: parentPrefix(of: key))
+    let task = Task { [weak self] in
+      guard let self else { return }
+      @MainActor func isCurrent() -> Bool {
+        !Task.isCancelled && self.keyNavigationID == id && self.location == origin
+          && self.objectLoadGeneration == generation && self.activeSearchContext?.id == searchID
+      }
+      defer {
+        if self.keyNavigationID == id {
+          self.isResolvingObjectKey = false
+          self.keyNavigationID = nil
+          self.keyNavigationTask = nil
+        }
+      }
+      do {
+        // Resolve the exact key before changing the browser, including real prefix-marker objects.
+        let target = ObjectRow(
+          id: ObjectRow.id(for: key, isPrefix: false), key: key,
+          displayName: String(decoding: key.utf8.dropFirst(destination.prefix.utf8.count), as: UTF8.self),
+          relativePath: "", size: 0, modifiedAt: nil, storageClass: nil, isPrefix: false)
+        let details = try await self.service.objectDetails(at: origin, object: target)
+        guard isCurrent() else { return }
+        var rows: [ObjectRow] = []
+        var token: String?
+        var seenTokens = Set<String>()
+        repeat {
+          let page = try await self.service.listObjects(at: destination, continuationToken: token)
+          guard isCurrent() else { return }
+          var pageRows = page.objects
+          token = page.continuationToken
+          // Delimited listings can omit real marker objects entirely. HEAD proved
+          // this exact object exists, so retain its object identity and metadata.
+          if key.utf8.last == 0x2F
+            && !pageRows.contains(where: { !$0.isPrefix && $0.key.utf8.elementsEqual(key.utf8) })
+          {
+            pageRows.append(ObjectRow(
+              id: target.id, key: key,
+              displayName: target.displayName.isEmpty ? key : target.displayName,
+              relativePath: "", size: details.size, modifiedAt: details.lastModified,
+              storageClass: details.storageClass, isPrefix: false))
+          }
+          rows.append(contentsOf: pageRows)
+          if let match = pageRows.first(where: {
+            $0.key.utf8.elementsEqual(key.utf8) && !$0.isPrefix
+          }) {
+            self.resetSearch(clearQuery: true)
+            self.navigate(to: destination.prefix)
+            self.objectLoadGeneration = UUID()
+            self.loadedObjectContext = ObjectLoadContext(location: destination)
+            self.invalidateLoadingIndicator(.objects)
+            self.invalidateLoadingIndicator(.pagination)
+            self.isLoadingObjects = false
+            self.isLoadingMore = false
+            self.objects = rows
+            self.continuationToken = token
+            self.seenObjectContinuationTokens = seenTokens
+            self.selectedObjectIDs = [match.id]
+            self.objectDetails = details
+            self.objectErrorMessage = nil
+            self.objectErrorSecondaryMessage = nil
+            self.paginationErrorMessage = nil
+            self.paginationErrorSecondaryMessage = nil
+            return
+          }
+          if let token, !seenTokens.insert(token).inserted {
+            throw S3ServiceError.service("The server returned a repeated object pagination token.")
+          }
+        } while token != nil
+        throw S3ServiceError.notFound
+      } catch {
+        guard isCurrent() else { return }
+        self.navigationErrorMessage = (error as? S3ServiceError) == .notFound
+          ? "Object not found. Check the exact key and try again." : error.localizedDescription
+      }
+    }
+    keyNavigationTask = task
+    await withTaskCancellationHandler {
+      await task.value
+    } onCancel: {
+      task.cancel()
+    }
+  }
+
   func revealSelectedInPrefix() async {
     guard isSearchMode, let object = selectedObject else { return }
     let candidateIDs = object.key.hasSuffix("/")
@@ -449,8 +563,11 @@ final class WorkbenchViewModel {
     objectDetails = nil
     guard let location, let selectedObject, !selectedObject.isPrefix else { return }
     do {
-      objectDetails = try await service.objectDetails(at: location, object: selectedObject)
+      let details = try await service.objectDetails(at: location, object: selectedObject)
+      guard self.location == location, self.selectedObject?.id == selectedObject.id else { return }
+      objectDetails = details
     } catch {
+      guard self.location == location, self.selectedObject?.id == selectedObject.id else { return }
       errorMessage = error.localizedDescription
     }
   }
