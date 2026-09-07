@@ -332,6 +332,7 @@ protocol WorkbenchServing: Sendable {
   ) async throws -> ObjectSearchPage
   func cancelObjectSearch(at location: ObjectLocation) async
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails
+  func hasUploadConflicts(files: [URL], to location: ObjectLocation) async throws -> Bool
   func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws
   func download(
     objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
@@ -355,6 +356,10 @@ protocol WorkbenchServing: Sendable {
 }
 
 extension WorkbenchServing {
+  func hasUploadConflicts(files: [URL], to location: ObjectLocation) async throws -> Bool {
+    throw WorkbenchUIError.serviceUnavailable
+  }
+
   func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL {
     throw WorkbenchUIError.serviceUnavailable
   }

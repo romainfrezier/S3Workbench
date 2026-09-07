@@ -8,8 +8,8 @@ struct S3WorkbenchApp: App {
 
   var body: some Scene {
     WindowGroup {
-      WorkbenchRootView(
-        model: model,
+      WorkbenchWindowView(
+        settingsModel: model,
         preferences: preferences,
         settingsNavigation: settingsNavigation
       )
@@ -29,7 +29,29 @@ struct S3WorkbenchApp: App {
         model: model
       )
       .preferredColorScheme(preferences.appearance.colorScheme)
+      .task { await model.start() }
     }
+  }
+}
+
+struct WorkbenchWindowView: View {
+  @State private var model: WorkbenchViewModel
+  let preferences: AppPreferences
+  let settingsNavigation: SettingsNavigationModel
+
+  init(
+    settingsModel: WorkbenchViewModel,
+    preferences: AppPreferences,
+    settingsNavigation: SettingsNavigationModel
+  ) {
+    _model = State(initialValue: settingsModel.makeWindowModel())
+    self.preferences = preferences
+    self.settingsNavigation = settingsNavigation
+  }
+
+  var body: some View {
+    WorkbenchRootView(
+      model: model, preferences: preferences, settingsNavigation: settingsNavigation)
   }
 }
 

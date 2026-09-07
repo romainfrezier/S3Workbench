@@ -19,6 +19,7 @@ struct WorkbenchRootView: View {
   @State private var connectionToDelete: ConnectionRow?
   @State private var renameKey: String?
   @State private var pendingUploadURLs: [URL] = []
+  @State private var pendingUploadLocation: ObjectLocation?
   @State private var pendingDownloadDirectory: URL?
   @State private var isUploadCollisionPresented = false
   @State private var isDownloadCollisionPresented = false
@@ -92,13 +93,16 @@ struct WorkbenchRootView: View {
       }
     }
     .confirmationDialog(
-      "If an object already exists",
+      "An object already exists",
       isPresented: $isUploadCollisionPresented,
       titleVisibility: .visible
     ) {
       Button("Keep Both") { performUpload(.keepBoth) }
       Button("Replace", role: .destructive) { performUpload(.replace) }
-      Button("Cancel", role: .cancel) { pendingUploadURLs = [] }
+      Button("Cancel", role: .cancel) {
+        pendingUploadURLs = []
+        pendingUploadLocation = nil
+      }
     } message: {
       Text("Choose how uploads with the same key should be handled.")
     }
@@ -152,8 +156,8 @@ struct WorkbenchRootView: View {
     .quickLookPreview($model.previewURL)
     .focusedSceneValue(\.workbenchCommandContext, commandContext)
     .task { await model.start() }
-    .task(id: model.selectedConnectionID) {
-      guard model.selectedConnectionID != nil else { return }
+    .onChange(of: model.connections) { _, _ in model.reconcileConnections() }
+    .task(id: model.selectedConnection) {
       await model.reloadConnection()
     }
     .task(id: model.selectedObjectIDs) { await model.loadSelectionDetails() }
@@ -405,12 +409,24 @@ struct WorkbenchRootView: View {
   }
 
   private func requestUpload(_ urls: [URL]) {
-    guard !urls.isEmpty else { return }
-    pendingUploadURLs = urls
+    guard !urls.isEmpty, let location = model.location, pendingUploadURLs.isEmpty else { return }
     if preferences.uploadCollision == .keepBoth {
-      performUpload(.keepBoth)
+      Task { await model.upload(urls, to: location, collisionPolicy: .keepBoth) }
     } else {
-      isUploadCollisionPresented = true
+      pendingUploadURLs = urls
+      pendingUploadLocation = location
+      Task {
+        guard let hasConflicts = await model.hasUploadConflicts(urls, at: location) else {
+          pendingUploadURLs = []
+          pendingUploadLocation = nil
+          return
+        }
+        if hasConflicts {
+          isUploadCollisionPresented = true
+        } else {
+          performUpload(.cancel)
+        }
+      }
     }
   }
 
@@ -446,9 +462,11 @@ struct WorkbenchRootView: View {
   }
 
   private func performUpload(_ collisionPolicy: CollisionPolicy) {
+    guard let location = pendingUploadLocation else { return }
     let urls = pendingUploadURLs
     pendingUploadURLs = []
-    Task { await model.upload(urls, collisionPolicy: collisionPolicy) }
+    pendingUploadLocation = nil
+    Task { await model.upload(urls, to: location, collisionPolicy: collisionPolicy) }
   }
 
   private func performDownload(_ collisionPolicy: CollisionPolicy) {
