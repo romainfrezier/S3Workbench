@@ -39,7 +39,7 @@ struct WorkbenchRootView: View {
     .navigationSplitViewStyle(.balanced)
   }
 
-  var body: some View {
+  private var navigationContent: some View {
     navigation
     .toolbar { toolbarContent }
     .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Search below this prefix")
@@ -70,6 +70,10 @@ struct WorkbenchRootView: View {
     }
     .onChange(of: model.location) { _, _ in model.cancelKeyNavigation() }
     .onDisappear { model.cancelKeyNavigation() }
+  }
+
+  var body: some View {
+    navigationContent
     .sheet(
       isPresented: Binding(
         get: { renameKey != nil },
