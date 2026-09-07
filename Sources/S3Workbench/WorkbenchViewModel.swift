@@ -956,7 +956,8 @@ final class WorkbenchViewModel {
           at: context.location,
           query: context.query,
           continuationToken: nextSearchContinuationToken,
-          refreshIndex: context.refreshIndex && nextSearchContinuationToken == nil
+          refreshIndex: context.refreshIndex && nextSearchContinuationToken == nil,
+          searchID: context.id
         )
         try Task.checkCancellation()
         guard isActive(context), isSearching else {
@@ -1004,7 +1005,7 @@ final class WorkbenchViewModel {
         discardStaleSearch(context)
         return
       }
-      await service.cancelObjectSearch(at: context.location)
+      await service.cancelObjectSearch(id: context.id)
       isSearching = false
       searchTask = nil
       stopLoadingIndicator(.search, id: context.id)
@@ -1073,8 +1074,8 @@ final class WorkbenchViewModel {
   private func cancelRunningSearch() {
     guard let searchTask else { return }
     searchTask.cancel()
-    if let location = activeSearchContext?.location {
-      Task { await service.cancelObjectSearch(at: location) }
+    if let id = activeSearchContext?.id {
+      Task { await service.cancelObjectSearch(id: id) }
     }
   }
 

@@ -57,8 +57,9 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   private struct SearchIndexBuildSession: Sendable {
-    let build: ObjectIndexBuild
+    let build: ObjectIndexBuild?
     let scope: ObjectIndexScope
+    let searchID: UUID
   }
 
   struct RecursiveSearchPlan: Equatable, Sendable {
@@ -290,7 +291,8 @@ actor CoreWorkbenchService: WorkbenchServing {
     at location: ObjectLocation,
     query: String,
     continuationToken: String?,
-    refreshIndex: Bool
+    refreshIndex: Bool,
+    searchID: UUID = UUID()
   ) async throws -> ObjectSearchPage {
     guard !query.isEmpty else {
       throw S3ServiceError.invalidConfiguration("Enter a search query.")
@@ -343,7 +345,6 @@ actor CoreWorkbenchService: WorkbenchServing {
       }
     }
 
-    await abandonSearchIndexBuilds(for: scope)
     try Task.checkCancellation()
     if !refreshIndex {
       do {
@@ -365,7 +366,7 @@ actor CoreWorkbenchService: WorkbenchServing {
     try Task.checkCancellation()
     let isPathQualified = !Self.bytesEqual(plan.listingPrefix, location.prefix)
     guard let searchIndex, refreshIndex || !isPathQualified,
-      let build = try? await searchIndex.beginRebuild(for: scope)
+      let buildID = await beginSearchIndexBuild(scope: scope, searchID: searchID, index: searchIndex)
     else {
       return try await remoteSearchPage(
         service: context.service,
@@ -379,8 +380,6 @@ actor CoreWorkbenchService: WorkbenchServing {
       )
     }
 
-    let buildID = UUID()
-    searchIndexBuilds[buildID] = SearchIndexBuildSession(build: build, scope: scope)
     return try await remoteSearchPage(
       service: context.service,
       scope: scope,
@@ -460,11 +459,11 @@ actor CoreWorkbenchService: WorkbenchServing {
 
     var activeBuildID = buildID
     var indexSnapshot: ObjectIndexSnapshot?
-    if let buildID, let session = searchIndexBuilds[buildID], let searchIndex {
+    if let buildID, let build = searchIndexBuilds[buildID]?.build, let searchIndex {
       do {
-        try await searchIndex.append(page.objects, to: session.build)
+        try await searchIndex.append(page.objects, to: build)
         if page.nextContinuationToken == nil {
-          indexSnapshot = try await searchIndex.finishRebuild(session.build)
+          indexSnapshot = try await searchIndex.finishRebuild(build)
           searchIndexBuilds[buildID] = nil
           activeBuildID = nil
         }
@@ -503,11 +502,30 @@ actor CoreWorkbenchService: WorkbenchServing {
     )
   }
 
-  private func abandonSearchIndexBuilds(for scope: ObjectIndexScope) async {
-    let ids = searchIndexBuilds.compactMap { id, session in
-      session.scope == scope ? id : nil
+  private func beginSearchIndexBuild(
+    scope: ObjectIndexScope, searchID: UUID, index: ObjectSearchIndex
+  ) async -> UUID? {
+    // One rebuild per scope; another window can keep searching remotely.
+    guard !searchIndexBuilds.values.contains(where: {
+      $0.scope.connectionID == scope.connectionID
+        && Self.bytesEqual($0.scope.bucket, scope.bucket)
+        && Self.bytesEqual($0.scope.prefix, scope.prefix)
+    }) else { return nil }
+    let id = UUID()
+    searchIndexBuilds[id] = SearchIndexBuildSession(
+      build: nil, scope: scope, searchID: searchID)
+    guard let build = try? await index.beginRebuild(for: scope) else {
+      searchIndexBuilds[id] = nil
+      return nil
     }
-    for id in ids { await abandonSearchIndexBuild(id: id) }
+    guard searchIndexBuilds[id] != nil, !Task.isCancelled else {
+      searchIndexBuilds[id] = nil
+      try? await index.cancelRebuild(build)
+      return nil
+    }
+    searchIndexBuilds[id] = SearchIndexBuildSession(
+      build: build, scope: scope, searchID: searchID)
+    return id
   }
 
   private func abandonSearchIndexBuilds(connectionID: UUID) async {
@@ -517,17 +535,17 @@ actor CoreWorkbenchService: WorkbenchServing {
     for id in ids { await abandonSearchIndexBuild(id: id) }
   }
 
-  func cancelObjectSearch(at location: ObjectLocation) async {
+  func cancelObjectSearch(id searchID: UUID) async {
     let ids = searchIndexBuilds.compactMap { id, session in
-      session.scope.connectionID == location.connectionID
-        && Self.bytesEqual(session.scope.bucket, location.bucket) ? id : nil
+      session.searchID == searchID ? id : nil
     }
     for id in ids { await abandonSearchIndexBuild(id: id) }
   }
 
   private func abandonSearchIndexBuild(id: UUID) async {
-    guard let session = searchIndexBuilds.removeValue(forKey: id) else { return }
-    try? await searchIndex?.cancelRebuild(session.build)
+    guard let session = searchIndexBuilds.removeValue(forKey: id),
+      let build = session.build else { return }
+    try? await searchIndex?.cancelRebuild(build)
   }
 
   private nonisolated static func encodeSearchContinuation(
@@ -672,14 +690,35 @@ actor CoreWorkbenchService: WorkbenchServing {
     )
   }
 
+  private struct UploadDestination: Hashable {
+    let connectionID: UUID
+    let bucket: Data
+    let key: Data
+
+    init(connectionID: UUID, bucket: String, key: String) {
+      self.connectionID = connectionID
+      self.bucket = Data(bucket.utf8)
+      self.key = Data(key.utf8)
+    }
+  }
+
+  private var uploadReservations = Set<UploadDestination>()
+
   func hasUploadConflicts(files: [URL], to location: ObjectLocation) async throws -> Bool {
     let service = try await s3Service(at: location)
+    var destinations = Set<Data>()
     for source in files {
       try Task.checkCancellation()
+      let key = location.prefix + source.lastPathComponent
+      if !destinations.insert(Data(key.utf8)).inserted
+        || uploadReservations.contains(UploadDestination(
+          connectionID: location.connectionID, bucket: location.bucket, key: key))
+      {
+        return true
+      }
       do {
         try await requireRemoteDestinationAvailable(
-          service: service, bucket: location.bucket,
-          key: location.prefix + source.lastPathComponent)
+          service: service, bucket: location.bucket, key: key)
       } catch let error as S3ServiceError where error.isConflict {
         return true
       }
@@ -886,8 +925,13 @@ actor CoreWorkbenchService: WorkbenchServing {
         service: service,
         bucket: location.bucket,
         proposedKey: location.prefix + source.lastPathComponent,
-        collisionPolicy: collisionPolicy
+        collisionPolicy: collisionPolicy,
+        reservingFor: location.connectionID
       )
+      defer {
+        uploadReservations.remove(UploadDestination(
+          connectionID: location.connectionID, bucket: location.bucket, key: destinationKey))
+      }
       try await service.uploadFile(
         from: source,
         bucket: location.bucket,
@@ -1026,13 +1070,26 @@ actor CoreWorkbenchService: WorkbenchServing {
   }
 
   private func requireRemoteDestinationAvailable(
-    service: any S3Service, bucket: String, key: String
+    service: any S3Service, bucket: String, key: String,
+    reservingFor connectionID: UUID? = nil, allowReplace: Bool = false
   ) async throws {
+    let reservation = connectionID.map { UploadDestination(connectionID: $0, bucket: bucket, key: key) }
+    if let reservation, !uploadReservations.insert(reservation).inserted {
+      throw S3ServiceError.conflict("An upload to this destination is already in progress.")
+    }
     do {
-      _ = try await service.metadata(bucket: bucket, key: key)
-      throw S3ServiceError.conflict("An object already exists at \(key).")
-    } catch let error as S3ServiceError where error == .notFound {
-      return
+      if !allowReplace {
+        do {
+          _ = try await service.metadata(bucket: bucket, key: key)
+          throw S3ServiceError.conflict("An object already exists at \(key).")
+        } catch let error as S3ServiceError where error == .notFound {
+          // No remote object occupies this destination.
+        }
+      }
+      try Task.checkCancellation()
+    } catch {
+      if let reservation { uploadReservations.remove(reservation) }
+      throw error
     }
   }
 
@@ -1040,12 +1097,13 @@ actor CoreWorkbenchService: WorkbenchServing {
     service: any S3Service,
     bucket: String,
     proposedKey: String,
-    collisionPolicy: CollisionPolicy
+    collisionPolicy: CollisionPolicy,
+    reservingFor connectionID: UUID? = nil
   ) async throws -> String {
-    if collisionPolicy == .replace { return proposedKey }
     do {
       try await requireRemoteDestinationAvailable(
-        service: service, bucket: bucket, key: proposedKey)
+        service: service, bucket: bucket, key: proposedKey,
+        reservingFor: connectionID, allowReplace: collisionPolicy == .replace)
       return proposedKey
     } catch let error as S3ServiceError where error.isConflict && collisionPolicy == .keepBoth {
       let slash = proposedKey.lastIndex(of: "/")
@@ -1057,7 +1115,7 @@ actor CoreWorkbenchService: WorkbenchServing {
         let candidate = directory + "\(base) \(suffix)" + (ext.isEmpty ? "" : ".\(ext)")
         do {
           try await requireRemoteDestinationAvailable(
-            service: service, bucket: bucket, key: candidate)
+            service: service, bucket: bucket, key: candidate, reservingFor: connectionID)
           return candidate
         } catch let candidateError as S3ServiceError where candidateError.isConflict {
           continue

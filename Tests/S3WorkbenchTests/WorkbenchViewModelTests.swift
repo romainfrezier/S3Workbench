@@ -1138,6 +1138,74 @@ private actor GoToKeyGate {
   }
 }
 
+@Test func cancellingAnotherWindowDoesNotDiscardTheActiveSearchIndex() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Restricted",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/restricted",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-IndexedSearch-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: "access", secretKey: "secret"), for: connectionID)
+  let index = try ObjectSearchIndex(fileURL: directory.appendingPathComponent("index.sqlite3"))
+  let probe = SearchIndexServiceProbe()
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: index,
+    credentialStore: credentials,
+    s3ServiceFactory: { _, _ in
+      EmptyS3Service(listObjectsHandler: { bucket, prefix, delimiter, token, pageSize in
+        try await probe.page(
+          bucket: bucket,
+          prefix: prefix,
+          delimiter: delimiter,
+          continuationToken: token,
+          pageSize: pageSize
+        )
+      })
+    }
+  )
+  let location = ObjectLocation(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+  let scope = ObjectIndexScope(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+
+  let firstSearchID = UUID()
+  let secondSearchID = UUID()
+  let first = try await service.searchObjects(
+    at: location, query: "needle", continuationToken: nil, refreshIndex: false,
+    searchID: firstSearchID)
+  let otherLocation = ObjectLocation(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/alpha/")
+  let second = try await service.searchObjects(
+    at: otherLocation, query: "needle", continuationToken: nil, refreshIndex: false,
+    searchID: secondSearchID)
+  #expect(first.isBuildingIndex)
+  #expect(!second.isBuildingIndex)
+  await service.cancelObjectSearch(id: secondSearchID)
+  let completed = try await service.searchObjects(
+    at: location, query: "needle", continuationToken: try #require(first.continuationToken),
+    refreshIndex: false, searchID: firstSearchID)
+  #expect(completed.indexSnapshot?.objectCount == 4)
+  #expect(try await index.snapshot(for: scope)?.objectCount == 4)
+  let calls = await probe.calls.count
+  let cached = try await service.searchObjects(
+    at: otherLocation, query: "needle", continuationToken: nil, refreshIndex: false,
+    searchID: UUID())
+  #expect(cached.objects.map(\.key) == ["restricted/alpha/needle.txt"])
+  #expect(cached.scannedObjectCount == 0)
+  #expect(await probe.calls.count == calls)
+}
+
 @Test func recursiveSearchBuildsAndReusesAnAtomicIndexWithoutAnotherS3Scan() async throws {
   let connectionID = UUID()
   let profile = ConnectionProfile(
@@ -1218,16 +1286,17 @@ private actor GoToKeyGate {
   #expect(searchSnapshotsMatch(indexedPage.indexSnapshot, completedSnapshot))
   #expect(await probe.calls.count == initialCalls.count)
 
+  let refreshSearchID = UUID()
   let refreshPage = try await service.searchObjects(
     at: location,
     query: "needle",
     continuationToken: nil,
-    refreshIndex: true
+    refreshIndex: true, searchID: refreshSearchID
   )
   #expect(refreshPage.continuationToken != nil)
   #expect(await probe.calls.count == initialCalls.count + 1)
 
-  await service.cancelObjectSearch(at: location)
+  await service.cancelObjectSearch(id: refreshSearchID)
   #expect(searchSnapshotsMatch(try await index.snapshot(for: scope), completedSnapshot))
 
   let pageAfterCancellation = try await service.searchObjects(
@@ -1336,12 +1405,13 @@ private actor GoToKeyGate {
     prefix: "restricted/current/"
   )
 
+  let searchID = UUID()
   let first = try await service.searchObjects(
-    at: location, query: "needle", continuationToken: nil, refreshIndex: false)
+    at: location, query: "needle", continuationToken: nil, refreshIndex: false, searchID: searchID)
   guard let firstToken = first.continuationToken else {
     throw S3ServiceError.service("Expected a second remote search page.")
   }
-  await service.cancelObjectSearch(at: location)
+  await service.cancelObjectSearch(id: searchID)
   let second = try await service.searchObjects(
     at: location,
     query: "needle",
@@ -2411,7 +2481,7 @@ private actor StubWorkbenchService: WorkbenchServing {
     return try listObjectsResult.get()
   }
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool, searchID: UUID
   ) async throws -> ObjectSearchPage {
     searchCalls.append(
       SearchCall(
@@ -2425,7 +2495,7 @@ private actor StubWorkbenchService: WorkbenchServing {
     }
     return try await searchHandler(location, query, continuationToken)
   }
-  func cancelObjectSearch(at location: ObjectLocation) async {}
+  func cancelObjectSearch(id: UUID) async {}
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws
     -> ObjectDetails
   {

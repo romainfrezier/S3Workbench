@@ -14,6 +14,70 @@ func uploadCollisionPreflightChecksTheExactRemoteDestination(existing: Bool) asy
   #expect(await remote.uploadedKeys.isEmpty)
 }
 
+@Test(arguments: [false, true])
+func uploadCollisionPreflightDetectsDuplicateNamesWithoutNormalizingUnicode(duplicate: Bool) async throws {
+  let remote = UploadCollisionS3Service()
+  let (service, location) = uploadCollisionService(remote: remote)
+  // fileURLWithPath decomposes Unicode on macOS; encoded URLs preserve this fixture's bytes.
+  let files = [
+    URL(string: "file:///tmp/a/%C3%A9.txt")!,
+    URL(string: duplicate ? "file:///tmp/b/%C3%A9.txt" : "file:///tmp/b/e%CC%81.txt")!,
+  ]
+  #expect(files[0].lastPathComponent.utf8.elementsEqual(files[1].lastPathComponent.utf8) == duplicate)
+  #expect(try await service.hasUploadConflicts(files: files, to: location) == duplicate)
+  #expect(await remote.uploadedKeys.isEmpty)
+}
+
+@Test(arguments: [CollisionPolicy.cancel, .keepBoth])
+func simultaneousUploadsReserveTheirDestinationsAcrossRequests(policy: CollisionPolicy) async throws {
+  let remote = UploadCollisionS3Service(suspendFirstUpload: true)
+  let (service, location) = uploadCollisionService(remote: remote)
+  let first = Task {
+    try await service.upload(
+      files: [URL(fileURLWithPath: "/tmp/a/report.txt")], to: location, collisionPolicy: .cancel)
+  }
+  for _ in 0..<10_000 {
+    if await remote.startedUploadCount == 1 { break }
+    await Task.yield()
+  }
+  let started = await remote.startedUploadCount == 1
+  #expect(started)
+  guard started else {
+    await remote.releaseUploads()
+    try await first.value
+    return
+  }
+  #expect(try await service.hasUploadConflicts(
+    files: [URL(fileURLWithPath: "/tmp/b/report.txt")], to: location))
+  var secondError: Error?
+  do {
+    try await service.upload(
+      files: [URL(fileURLWithPath: "/tmp/b/report.txt")], to: location, collisionPolicy: policy)
+  } catch { secondError = error }
+  await remote.releaseUploads()
+  try await first.value
+
+  let keys = await remote.uploadedKeys
+  if policy == .cancel {
+    #expect((secondError as? S3ServiceError)?.isConflict == true)
+    #expect(keys == ["restricted//雪/report.txt"])
+  } else {
+    #expect(secondError == nil)
+    #expect(Set(keys) == ["restricted//雪/report.txt", "restricted//雪/report 2.txt"])
+  }
+}
+
+@Test func failedUploadReleasesItsDestinationForRetry() async throws {
+  let remote = UploadCollisionS3Service(uploadError: .networkUnavailable)
+  let (service, location) = uploadCollisionService(remote: remote)
+  let files = [URL(fileURLWithPath: "/tmp/report.txt")]
+  await #expect(throws: (any Error).self) {
+    try await service.upload(files: files, to: location, collisionPolicy: .cancel)
+  }
+  try await service.upload(files: files, to: location, collisionPolicy: .cancel)
+  #expect(await remote.uploadedKeys == ["restricted//雪/report.txt"])
+}
+
 @Test @MainActor
 func uploadCollisionPreflightReportsFailuresWithoutTreatingThemAsAvailableDestinations() async throws {
   let remote = UploadCollisionS3Service(metadataError: .accessDenied)
@@ -84,16 +148,27 @@ private actor UploadCollisionS3Service: S3Service {
   let metadataError: S3ServiceError?
   private(set) var checkedKeys: [String] = []
   private(set) var uploadedKeys: [String] = []
+  private(set) var startedUploadCount = 0
+  private var uploadError: S3ServiceError?
+  private let suspendFirstUpload: Bool
+  private var uploadsReleased = false
+  private var firstUpload: CheckedContinuation<Void, Never>?
 
-  init(existingKeys: Set<String> = [], metadataError: S3ServiceError? = nil) {
+  init(
+    existingKeys: Set<String> = [], metadataError: S3ServiceError? = nil,
+    suspendFirstUpload: Bool = false, uploadError: S3ServiceError? = nil
+  ) {
     self.existingKeys = existingKeys
     self.metadataError = metadataError
+    self.suspendFirstUpload = suspendFirstUpload
+    self.uploadError = uploadError
   }
 
   func metadata(bucket: String, key: String) async throws -> S3ObjectMetadata {
     checkedKeys.append(key)
     if let metadataError { throw metadataError }
-    guard existingKeys.contains(key) else { throw S3ServiceError.notFound }
+    guard existingKeys.contains(key) || uploadedKeys.contains(where: { $0.utf8.elementsEqual(key.utf8) })
+    else { throw S3ServiceError.notFound }
     return S3ObjectMetadata(
       key: key, size: 1, lastModified: nil, eTag: nil, contentType: nil,
       userMetadata: [:], headers: [:])
@@ -103,7 +178,21 @@ private actor UploadCollisionS3Service: S3Service {
     from sourceURL: URL, bucket: String, key: String, contentType: String?,
     metadata: [String: String], progress: TransferProgressHandler?
   ) async throws {
+    startedUploadCount += 1
+    if suspendFirstUpload, startedUploadCount == 1, !uploadsReleased {
+      await withCheckedContinuation { firstUpload = $0 }
+    }
+    if let uploadError {
+      self.uploadError = nil
+      throw uploadError
+    }
     uploadedKeys.append(key)
+  }
+
+  func releaseUploads() {
+    uploadsReleased = true
+    firstUpload?.resume()
+    firstUpload = nil
   }
 
   func testConnection() async throws -> ConnectionTestResult { .init(bucketCount: 0) }
