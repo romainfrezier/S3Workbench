@@ -6,6 +6,268 @@ import Testing
 @testable import S3Workbench
 
 @MainActor
+@Test func copyingObjectReferencesPreservesExactBytesAndBrowseState() async throws {
+  let service = StubWorkbenchService(connections: [], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.prefix = "current/"
+  let key = " leading/e\u{301}//雪 #?%/trailing "
+  let object = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  model.objects = [object]
+  model.select(object)
+  let pasteboard = NSPasteboard(name: NSPasteboard.Name("S3Workbench-Copy-\(UUID())"))
+  defer { pasteboard.releaseGlobally() }
+
+  model.copyObjectKey(to: pasteboard)
+  let copied = try #require(pasteboard.string(forType: .string))
+  #expect(Array(copied.utf8) == Array(key.utf8))
+  model.copyS3URI(to: pasteboard)
+  #expect(pasteboard.string(forType: .string) == S3ObjectURI.string(bucket: "bucket", key: key))
+  #expect(model.prefix == "current/")
+  #expect(model.selectedObjectIDs == [object.id])
+  #expect(await service.lastObjectLocation == nil)
+  #expect(await service.bucketListCallCount == 0)
+  #expect(await service.searchCalls.isEmpty)
+
+  let other = searchObject(id: "other", key: "other//file/")
+  model.copyObjectKey(other, to: pasteboard)
+  #expect(pasteboard.string(forType: .string) == other.key)
+  #expect(model.selectedObjectIDs == [object.id])
+  model.selectedObjectIDs = []
+  model.copyObjectKey(to: pasteboard)
+  #expect(pasteboard.string(forType: .string) == other.key)
+}
+
+@MainActor
+@Test(arguments: [false, true])
+func goToKeyFollowsPaginationAndSelectsTheByteExactObject(useURI: Bool) async throws {
+  let key = "restricted//nested/e\u{301} #?% .txt "
+  let equivalent = searchObject(id: "composed", key: "restricted//nested/é #?% .txt ")
+  let target = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  let connection = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [connection], listObjectsResult: .success(.empty),
+    listObjectsHandler: { location, token in
+      #expect(location.prefix == "restricted//nested/")
+      switch token {
+      case nil: return ObjectPage(objects: [equivalent], continuationToken: "page-2")
+      case "page-2": return ObjectPage(objects: [target], continuationToken: "page-3")
+      default: return .empty
+      }
+    }, objectDetailsHandler: { _, object in
+      #expect(Array(object.key.utf8) == Array(key.utf8))
+      return goToKeyDetails
+    })
+  let model = WorkbenchViewModel(service: service)
+  model.connections = [connection]
+  model.selectedConnectionID = connection.id
+  model.selectedBucket = "bucket"
+  model.prefix = "restricted/current/"
+
+  let previousReveal = model.objectRevealRequestID
+  await model.goToLocation(useURI ? S3ObjectURI.string(bucket: "bucket", key: key) : key)
+
+  #expect(model.prefix == "restricted//nested/")
+  #expect(model.selectedObjectIDs == [target.id])
+  #expect(model.objectRevealRequestID != previousReveal)
+  #expect(model.objects == [equivalent, target])
+  #expect(model.continuationToken == "page-3")
+  #expect(model.navigationErrorMessage == nil)
+  #expect(!model.isResolvingObjectKey)
+  #expect(await service.objectDetailsKeys == [key])
+  await model.loadMore()
+  #expect(model.selectedObjectIDs == [target.id])
+  #expect(model.continuationToken == nil)
+}
+
+@MainActor
+@Test(arguments: [S3ServiceError.notFound, .accessDenied, .networkUnavailable])
+func goToKeyFailureKeepsTheExistingLocationAndSelection(error: S3ServiceError) async {
+  let service = StubWorkbenchService(
+    connections: [], listObjectsResult: .success(.empty),
+    objectDetailsHandler: { _, _ in throw error })
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.prefix = "current/"
+  let previous = searchObject(id: "previous", key: "current/previous.txt")
+  model.objects = [previous]
+  model.select(previous)
+  model.continuationToken = "next"
+
+  await model.goToObjectKey("somewhere/target.txt")
+
+  #expect(model.prefix == "current/")
+  #expect(model.objects == [previous])
+  #expect(model.selectedObjectIDs == [previous.id])
+  #expect(model.continuationToken == "next")
+  #expect(model.navigationErrorMessage != nil)
+  #expect(model.errorMessage == nil)
+  #expect(await service.lastObjectLocation == nil)
+}
+
+@MainActor
+@Test func goToKeyRejectsEmptyAndOutOfRootKeysBeforeAnyRequest() async {
+  let connection = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(connections: [connection], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+  model.connections = [connection]
+  model.selectedConnectionID = connection.id
+  model.selectedBucket = "bucket"
+  model.prefix = "restricted/"
+  for key in ["", "restricted-other/file", "elsewhere/file"] {
+    await model.goToObjectKey(key)
+    #expect(model.navigationErrorMessage != nil)
+    #expect(model.prefix == "restricted/")
+  }
+  #expect(await service.objectDetailsKeys.isEmpty)
+  #expect(await service.lastObjectLocation == nil)
+}
+
+@MainActor
+@Test(arguments: ["cancel", "connection", "bucket", "prefix", "input"], [false, true])
+func goToKeyRejectsLateResolutionWhenItsContextChanges(change: String, useURI: Bool) async {
+  let gate = GoToKeyGate()
+  let service = StubWorkbenchService(
+    connections: [], listObjectsResult: .success(.empty),
+    objectDetailsHandler: { _, _ in await gate.wait(); return goToKeyDetails })
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.prefix = "current/"
+  let previousReveal = model.objectRevealRequestID
+  let task = Task { await model.goToLocation(useURI ? "s3://bucket/target/file" : "target/file") }
+  for _ in 0..<10_000 {
+    if await gate.started { break }
+    await Task.yield()
+  }
+  #expect(await gate.started)
+  switch change {
+  case "connection": model.selectedConnectionID = UUID()
+  case "bucket": model.selectedBucket = "other"
+  case "prefix": model.prefix = "elsewhere/"
+  case "input": await model.goToLocation("s3://other-bucket/file")
+  default: task.cancel()
+  }
+  let expected = model.location
+  await gate.release()
+  await task.value
+  #expect(model.location == expected)
+  #expect(model.objects.isEmpty)
+  #expect(await service.lastObjectLocation == nil)
+  #expect(!model.isResolvingObjectKey)
+  #expect(model.objectRevealRequestID == previousReveal)
+}
+
+@MainActor
+@Test(arguments: ["s3://other/restricted/file", "s3://bucket/elsewhere/file",
+  "s3://bucket/restricted/%ZZ", "https://bucket/restricted/file", "s3:/bucket/file"])
+func invalidOrOutOfScopeURIsKeepTheBrowserUntouched(input: String) async {
+  let connection = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(connections: [connection], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+  model.connections = [connection]
+  model.selectedConnectionID = connection.id
+  model.selectedBucket = "bucket"
+  model.prefix = "restricted/current/"
+  let object = searchObject(id: "previous", key: "restricted/current/previous.txt")
+  model.objects = [object]
+  model.select(object)
+  let previousLocation = model.location
+  let previousReveal = model.objectRevealRequestID
+  await model.goToLocation(input)
+  #expect(model.location == previousLocation)
+  #expect(model.selectedObjectIDs == [object.id])
+  #expect(model.objects == [object])
+  #expect(model.objectRevealRequestID == previousReveal)
+  #expect(model.navigationErrorMessage != nil)
+  #expect(await service.objectDetailsKeys.isEmpty)
+  #expect(await service.lastObjectLocation == nil)
+}
+
+@MainActor
+@Test func goToKeyListingFailureDoesNotPublishPartialResults() async {
+  let partial = searchObject(id: "partial", key: "target/a")
+  let service = StubWorkbenchService(
+    connections: [], listObjectsResult: .success(.empty),
+    listObjectsHandler: { _, token in
+      if token == nil { return ObjectPage(objects: [partial], continuationToken: "next") }
+      throw S3ServiceError.accessDenied
+    }, objectDetailsHandler: { _, _ in goToKeyDetails })
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.prefix = "current/"
+  await model.goToObjectKey("target/file")
+  #expect(model.prefix == "current/")
+  #expect(model.objects.isEmpty)
+  #expect(model.navigationErrorMessage != nil)
+}
+
+@MainActor
+@Test(arguments: [false, true], [false, true])
+func goToKeyPreservesTrailingSlashMarkers(atAccessRoot: Bool, omittedByListing: Bool) async {
+  let key = atAccessRoot ? "restricted/" : "restricted/folder/"
+  let folder = ObjectRow(
+    id: ObjectRow.id(for: key, isPrefix: true), key: key, displayName: "folder/",
+    relativePath: "", size: 0, modifiedAt: nil, storageClass: nil, isPrefix: true)
+  let connection = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [connection],
+    listObjectsResult: .success(ObjectPage(objects: atAccessRoot || omittedByListing ? [] : [folder], continuationToken: nil)),
+    objectDetailsHandler: { _, object in
+      #expect(object.key == key)
+      return goToKeyDetails
+    })
+  let model = WorkbenchViewModel(service: service)
+  model.connections = [connection]
+  model.selectedConnectionID = connection.id
+  model.selectedBucket = "bucket"
+  model.prefix = "restricted/elsewhere/"
+  await model.goToObjectKey(key)
+  #expect(model.prefix == "restricted/")
+  #expect(model.selectedObject?.key == key)
+  #expect(model.selectedObject?.isPrefix == false)
+  #expect(model.selectedObject?.size == goToKeyDetails.size)
+  #expect(model.navigationErrorMessage == nil)
+}
+
+@MainActor
+@Test(arguments: ["s3:archive/log.txt", "notes://literal/file", "folder/s3://literal/file"])
+func goToLocationPreservesColonKeys(key: String) async {
+  let target = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  let service = StubWorkbenchService(
+    connections: [], listObjectsResult: .success(ObjectPage(objects: [target], continuationToken: nil)),
+    objectDetailsHandler: { _, object in
+      #expect(object.key.utf8.elementsEqual(key.utf8))
+      return goToKeyDetails
+    })
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  // URI-shaped keys remain addressable as the key component of an S3 URI.
+  await model.goToLocation(key.hasPrefix("notes://") ? S3ObjectURI.string(bucket: "bucket", key: key) : key)
+  #expect(model.selectedObject?.key == key)
+  #expect(model.navigationErrorMessage == nil)
+}
+
+private let goToKeyDetails = ObjectDetails(
+  contentType: nil, eTag: nil, lastModified: nil, size: 1, storageClass: nil, metadata: [:], headers: [:])
+
+private actor GoToKeyGate {
+  var started = false
+  private var released = false
+  private var continuation: CheckedContinuation<Void, Never>?
+  func wait() async {
+    started = true
+    guard !released else { return }
+    await withCheckedContinuation { continuation = $0 }
+  }
+  func release() { released = true; continuation?.resume(); continuation = nil }
+}
+
+@MainActor
 @Test func directAccessRootBypassesBucketListing() async throws {
   let connection = ConnectionRow(
     id: UUID(),
@@ -29,6 +291,132 @@ import Testing
   #expect(await service.bucketListCallCount == 0)
   #expect(await service.lastObjectLocation?.bucket == "tickets")
   #expect(await service.lastObjectLocation?.prefix == "incoming/")
+}
+
+@MainActor
+@Test func windowModelsShareConnectionsButKeepNavigationAndSelectionIndependent() async {
+  let first = restrictedConnection(id: UUID())
+  let second = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty))
+  let settings = WorkbenchViewModel(service: service)
+  let left = settings.makeWindowModel()
+  let right = settings.makeWindowModel()
+  await left.start()
+  await right.start()
+  await left.reloadConnection()
+  await right.reloadConnection()
+
+  left.navigate(to: "restricted/left/")
+  left.selectedObjectIDs = ["left-object"]
+  left.searchQuery = "left query"
+  right.selectedConnectionID = second.id
+  await right.reloadConnection()
+
+  #expect(left !== right)
+  #expect(left.selectedConnectionID == first.id)
+  #expect(left.prefix == "restricted/left/")
+  #expect(left.selectedObjectIDs == ["left-object"])
+  #expect(left.searchQuery == "left query")
+  #expect(right.prefix == "restricted/")
+  #expect(right.selectedObjectIDs.isEmpty)
+  #expect(right.searchQuery.isEmpty)
+
+  settings.connections.removeAll { $0.id == second.id }
+  right.reconcileConnections()
+  #expect(left.connections == [first])
+  #expect(right.connections == [first])
+  #expect(right.selectedConnectionID == first.id)
+  #expect(left.prefix == "restricted/left/")
+}
+
+@MainActor
+@Test func switchingConnectionsRestoresEachBucketPrefixAndHistory() async {
+  var first = restrictedConnection(id: UUID())
+  first.accessPath = nil
+  var second = restrictedConnection(id: UUID())
+  second.accessPath = nil
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty),
+    bucketListHandler: { _ in [BucketRow(name: "bucket", creationDate: nil)] })
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+  await model.reloadConnection()
+  await model.openBucket("bucket")
+  model.navigate(to: "first//café/")
+  model.navigate(to: "first//café/deeper/")
+  await model.reloadObjects()
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  await model.openBucket("bucket")
+  model.navigate(to: "second/")
+  await model.reloadObjects()
+
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.selectedBucket == "bucket")
+  #expect(model.prefix == "first//café/deeper/")
+  #expect(await service.lastObjectLocation == model.location)
+  await model.goBack()
+  #expect(model.prefix == "first//café/")
+
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  #expect(model.prefix == "second/")
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.prefix == "first//café/")
+  #expect(model.canGoForward)
+  await model.goForward()
+  #expect(model.prefix == "first//café/deeper/")
+}
+
+@MainActor
+@Test func restrictedConnectionRestoresLocationButDiscardsItWhenAccessRootChanges() async {
+  let first = restrictedConnection(id: UUID())
+  let second = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+  await model.reloadConnection()
+  model.navigate(to: "restricted/child//雪/")
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.prefix == "restricted/child//雪/")
+  #expect(await service.bucketListCallCount == 0)
+
+  model.connections[0].accessPath = "/other/safe"
+  await model.reloadConnection()
+  #expect(model.selectedBucket == "other")
+  #expect(model.prefix == "safe/")
+  #expect(model.history == ["safe/"])
+  #expect(!model.canGoBack)
+}
+
+@MainActor
+@Test func returningToConnectionAfterLeavingItsBucketKeepsTheBucketList() async {
+  var first = restrictedConnection(id: UUID())
+  first.accessPath = nil
+  let second = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty),
+    bucketListHandler: { _ in [BucketRow(name: "bucket", creationDate: nil)] })
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+  await model.reloadConnection()
+  await model.openBucket("bucket")
+  model.navigate(to: "child/")
+  await model.navigateToRoot()
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.selectedBucket == nil)
+  #expect(model.prefix.isEmpty)
+  #expect(model.objects.isEmpty)
 }
 
 @MainActor
@@ -515,7 +903,7 @@ import Testing
     id: "prefix", key: "restricted/current/folder/", displayName: "folder", relativePath: "",
     size: 0, modifiedAt: nil, storageClass: nil, isPrefix: true)
   let browsingCommands: Set<WorkbenchCommand> = [
-    .search, .upload, .refresh, .back, .forward, .toggleInspector,
+    .search, .upload, .goToLocation, .refresh, .back, .forward, .toggleInspector,
   ]
 
   func routedCommands(
@@ -537,7 +925,7 @@ import Testing
   model.selectedObjectIDs = [first.id]
   #expect(
     routedCommands(for: model)
-      == browsingCommands.union([.download, .quickLook, .delete]))
+      == browsingCommands.union([.download, .quickLook, .copyObjectKey, .copyS3URI, .delete]))
 
   model.selectedObjectIDs = [first.id, second.id]
   #expect(routedCommands(for: model) == browsingCommands.union([.download, .delete]))
@@ -750,6 +1138,74 @@ import Testing
   }
 }
 
+@Test func cancellingAnotherWindowDoesNotDiscardTheActiveSearchIndex() async throws {
+  let connectionID = UUID()
+  let profile = ConnectionProfile(
+    id: connectionID,
+    name: "Restricted",
+    endpoint: URL(string: "https://storage.example.com")!,
+    accessPath: "/bucket/restricted",
+    addressingStyle: .path
+  )
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("S3Workbench-IndexedSearch-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let store = ConnectionStore(fileURL: directory.appendingPathComponent("connections.json"))
+  try await store.save([profile])
+  let credentials = InMemoryCredentialStore()
+  try credentials.save(
+    S3Credentials(accessKey: "access", secretKey: "secret"), for: connectionID)
+  let index = try ObjectSearchIndex(fileURL: directory.appendingPathComponent("index.sqlite3"))
+  let probe = SearchIndexServiceProbe()
+  let service = CoreWorkbenchService(
+    connectionStore: store,
+    searchIndex: index,
+    credentialStore: credentials,
+    s3ServiceFactory: { _, _ in
+      EmptyS3Service(listObjectsHandler: { bucket, prefix, delimiter, token, pageSize in
+        try await probe.page(
+          bucket: bucket,
+          prefix: prefix,
+          delimiter: delimiter,
+          continuationToken: token,
+          pageSize: pageSize
+        )
+      })
+    }
+  )
+  let location = ObjectLocation(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+  let scope = ObjectIndexScope(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/")
+
+  let firstSearchID = UUID()
+  let secondSearchID = UUID()
+  let first = try await service.searchObjects(
+    at: location, query: "needle", continuationToken: nil, refreshIndex: false,
+    searchID: firstSearchID)
+  let otherLocation = ObjectLocation(
+    connectionID: connectionID, bucket: "bucket", prefix: "restricted/alpha/")
+  let second = try await service.searchObjects(
+    at: otherLocation, query: "needle", continuationToken: nil, refreshIndex: false,
+    searchID: secondSearchID)
+  #expect(first.isBuildingIndex)
+  #expect(!second.isBuildingIndex)
+  await service.cancelObjectSearch(id: secondSearchID)
+  let completed = try await service.searchObjects(
+    at: location, query: "needle", continuationToken: try #require(first.continuationToken),
+    refreshIndex: false, searchID: firstSearchID)
+  #expect(completed.indexSnapshot?.objectCount == 4)
+  #expect(try await index.snapshot(for: scope)?.objectCount == 4)
+  let calls = await probe.calls.count
+  let cached = try await service.searchObjects(
+    at: otherLocation, query: "needle", continuationToken: nil, refreshIndex: false,
+    searchID: UUID())
+  #expect(cached.objects.map(\.key) == ["restricted/alpha/needle.txt"])
+  #expect(cached.scannedObjectCount == 0)
+  #expect(await probe.calls.count == calls)
+}
+
 @Test func recursiveSearchBuildsAndReusesAnAtomicIndexWithoutAnotherS3Scan() async throws {
   let connectionID = UUID()
   let profile = ConnectionProfile(
@@ -830,16 +1286,17 @@ import Testing
   #expect(searchSnapshotsMatch(indexedPage.indexSnapshot, completedSnapshot))
   #expect(await probe.calls.count == initialCalls.count)
 
+  let refreshSearchID = UUID()
   let refreshPage = try await service.searchObjects(
     at: location,
     query: "needle",
     continuationToken: nil,
-    refreshIndex: true
+    refreshIndex: true, searchID: refreshSearchID
   )
   #expect(refreshPage.continuationToken != nil)
   #expect(await probe.calls.count == initialCalls.count + 1)
 
-  await service.cancelObjectSearch(at: location)
+  await service.cancelObjectSearch(id: refreshSearchID)
   #expect(searchSnapshotsMatch(try await index.snapshot(for: scope), completedSnapshot))
 
   let pageAfterCancellation = try await service.searchObjects(
@@ -948,12 +1405,13 @@ import Testing
     prefix: "restricted/current/"
   )
 
+  let searchID = UUID()
   let first = try await service.searchObjects(
-    at: location, query: "needle", continuationToken: nil, refreshIndex: false)
+    at: location, query: "needle", continuationToken: nil, refreshIndex: false, searchID: searchID)
   guard let firstToken = first.continuationToken else {
     throw S3ServiceError.service("Expected a second remote search page.")
   }
-  await service.cancelObjectSearch(at: location)
+  await service.cancelObjectSearch(id: searchID)
   let second = try await service.searchObjects(
     at: location,
     query: "needle",
@@ -1196,6 +1654,42 @@ import Testing
   #expect(indexedPage.objects.map(\.key) == ["recursive-search/nested/object-0001.txt"])
   #expect(indexedPage.scannedObjectCount == 0)
   #expect(await counter.count == 2)
+
+  let navigationService = CoreWorkbenchService(connectionStore: store, credentialStore: credentials)
+  let connectionRows = try await navigationService.loadConnections()
+  let model = await MainActor.run {
+    let model = WorkbenchViewModel(service: navigationService)
+    model.connections = connectionRows
+    model.selectedConnectionID = connectionID
+    model.selectedBucket = bucket
+    model.prefix = "recursive-search/"
+    return model
+  }
+  await model.goToObjectKey("recursive-search/nested/object-1004-needle.txt")
+  await MainActor.run {
+    #expect(model.selectedObject?.key == "recursive-search/nested/object-1004-needle.txt")
+    #expect(model.prefix == "recursive-search/nested/")
+    #expect(model.objects.count == 1_005)
+    #expect(model.navigationErrorMessage == nil)
+  }
+
+  let markerKey = "recursive-search/nested-marker/"
+  let markerSource = directory.appendingPathComponent("marker.txt")
+  try Data("marker".utf8).write(to: markerSource)
+  let markerService = try AWSS3Service(
+    profile: profile, credentials: S3Credentials(accessKey: accessKey, secretKey: secretKey))
+  try await markerService.uploadFile(
+    from: markerSource, bucket: bucket, key: markerKey, contentType: nil, metadata: [:], progress: nil)
+  #expect(try await markerService.metadata(bucket: bucket, key: markerKey).size == 6)
+  await model.goToLocation(S3ObjectURI.string(bucket: bucket, key: markerKey))
+  await MainActor.run {
+    #expect(model.prefix == "recursive-search/")
+    #expect(model.selectedObject?.key == markerKey)
+    #expect(model.selectedObject?.isPrefix == false)
+    #expect(model.selectedObject?.size == 6)
+    #expect(model.navigationErrorMessage == nil)
+  }
+  try await markerService.deleteObject(bucket: bucket, key: markerKey)
 }
 
 @MainActor
@@ -1926,6 +2420,8 @@ private actor StubWorkbenchService: WorkbenchServing {
   private let searchHandler: SearchHandler?
   private let removeConnectionHandler: RemoveConnectionHandler?
   private let downloadHandler: DownloadHandler?
+  private let objectDetailsHandler: (@Sendable (ObjectLocation, ObjectRow) async throws -> ObjectDetails)?
+  private(set) var objectDetailsKeys: [String] = []
   private(set) var bucketListCallCount = 0
   private(set) var lastObjectLocation: ObjectLocation?
   private(set) var searchCalls: [SearchCall] = []
@@ -1938,7 +2434,8 @@ private actor StubWorkbenchService: WorkbenchServing {
     downloadHandler: DownloadHandler? = nil,
     listObjectsHandler: ListObjectsHandler? = nil,
     bucketListHandler: BucketListHandler? = nil,
-    removeConnectionHandler: RemoveConnectionHandler? = nil
+    removeConnectionHandler: RemoveConnectionHandler? = nil,
+    objectDetailsHandler: (@Sendable (ObjectLocation, ObjectRow) async throws -> ObjectDetails)? = nil
   ) {
     self.connections = connections
     self.listObjectsResult = listObjectsResult
@@ -1947,6 +2444,7 @@ private actor StubWorkbenchService: WorkbenchServing {
     self.searchHandler = searchHandler
     self.removeConnectionHandler = removeConnectionHandler
     self.downloadHandler = downloadHandler
+    self.objectDetailsHandler = objectDetailsHandler
   }
 
   func loadConnections() async throws -> [ConnectionRow] { connections }
@@ -1983,7 +2481,7 @@ private actor StubWorkbenchService: WorkbenchServing {
     return try listObjectsResult.get()
   }
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool, searchID: UUID
   ) async throws -> ObjectSearchPage {
     searchCalls.append(
       SearchCall(
@@ -1997,10 +2495,16 @@ private actor StubWorkbenchService: WorkbenchServing {
     }
     return try await searchHandler(location, query, continuationToken)
   }
-  func cancelObjectSearch(at location: ObjectLocation) async {}
+  func cancelObjectSearch(id: UUID) async {}
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws
     -> ObjectDetails
-  { throw S3ServiceError.unsupported("Not used by this test.") }
+  {
+    objectDetailsKeys.append(object.key)
+    guard let objectDetailsHandler else {
+      throw S3ServiceError.unsupported("Not used by this test.")
+    }
+    return try await objectDetailsHandler(location, object)
+  }
   func upload(
     files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy
   ) async throws {}

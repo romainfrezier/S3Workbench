@@ -5,8 +5,18 @@ import S3WorkbenchCore
 
 @MainActor
 @Observable
+final class WorkbenchConnections {
+  var rows: [ConnectionRow] = []
+}
+
+@MainActor
+@Observable
 final class WorkbenchViewModel {
-  var connections: [ConnectionRow] = []
+  private let connectionLibrary: WorkbenchConnections
+  var connections: [ConnectionRow] {
+    get { connectionLibrary.rows }
+    set { connectionLibrary.rows = newValue }
+  }
   var selectedConnectionID: UUID?
   var buckets: [BucketRow] = []
   var selectedBucket: String?
@@ -49,6 +59,11 @@ final class WorkbenchViewModel {
   }
   var history: [String] = [""]
   var historyIndex = 0
+  private(set) var isResolvingObjectKey = false
+  private(set) var objectRevealRequestID = UUID()
+  var navigationErrorMessage: String?
+  private var keyNavigationID: UUID?
+  private var keyNavigationTask: Task<Void, Never>?
 
   private let service: any WorkbenchServing
   private var loadedBucketConnectionID: UUID?
@@ -68,8 +83,25 @@ final class WorkbenchViewModel {
   @ObservationIgnored private var loadingIndicatorTasks: [LoadingIndicator: Task<Void, Never>] = [:]
   @ObservationIgnored private var loadingIndicatorIDs: [LoadingIndicator: UUID] = [:]
 
-  init(service: any WorkbenchServing) {
+  private var browsingConnection: ConnectionRow?
+  private var connectionNavigation: [UUID: ConnectionNavigation] = [:]
+
+  init(service: any WorkbenchServing, connections: WorkbenchConnections = WorkbenchConnections()) {
     self.service = service
+    self.connectionLibrary = connections
+  }
+
+  func makeWindowModel() -> WorkbenchViewModel {
+    WorkbenchViewModel(service: service, connections: connectionLibrary)
+  }
+
+  func reconcileConnections() {
+    connectionNavigation = connectionNavigation.filter { id, _ in
+      connections.contains { $0.id == id }
+    }
+    if !connections.contains(where: { $0.id == selectedConnectionID }) {
+      selectedConnectionID = connections.first?.id
+    }
   }
 
   var selectedConnection: ConnectionRow? {
@@ -126,11 +158,35 @@ final class WorkbenchViewModel {
   }
 
   func reloadConnection() async {
+    if let browsingConnection,
+      connections.contains(where: { $0.id == browsingConnection.id })
+    {
+      connectionNavigation[browsingConnection.id] = ConnectionNavigation(
+        connection: browsingConnection, bucket: selectedBucket, prefix: prefix,
+        history: history, historyIndex: historyIndex)
+    }
+    browsingConnection = selectedConnection
+    let saved = selectedConnectionID.flatMap { connectionNavigation[$0] }
+    let restoresLocation = saved?.connection.endpoint == selectedConnection?.endpoint
+      && saved?.connection.accessPath == selectedConnection?.accessPath
+    let navigation = restoresLocation ? saved : nil
     let generation = UUID()
     bucketLoadGeneration = generation
     invalidateLoadingIndicator(.buckets)
     isLoadingBuckets = false
     resetSearch(clearQuery: true)
+    objectLoadGeneration = UUID()
+    loadedObjectContext = nil
+    invalidateLoadingIndicator(.objects)
+    invalidateLoadingIndicator(.pagination)
+    isLoadingObjects = false
+    isLoadingMore = false
+    continuationToken = nil
+    objectErrorMessage = nil
+    objectErrorSecondaryMessage = nil
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
+    previewURL = nil
     selectedBucket = nil
     prefix = ""
     objects = []
@@ -149,10 +205,17 @@ final class WorkbenchViewModel {
       selectedBucket = accessRoot.bucket
       prefix = accessRoot.prefix
       history = [accessRoot.prefix]
+      if let navigation, navigation.bucket == accessRoot.bucket,
+        navigation.prefix.utf8.starts(with: accessRoot.prefix.utf8),
+        navigation.history.allSatisfy({ $0.utf8.starts(with: accessRoot.prefix.utf8) })
+      {
+        restoreNavigation(navigation)
+      }
       await reloadObjects()
       return
     }
     if loadedBucketConnectionID != selectedConnectionID { buckets = [] }
+    if let navigation { restoreNavigation(navigation) }
     isLoadingBuckets = true
     let loadingID = startLoadingIndicator(.buckets)
     defer {
@@ -165,6 +228,16 @@ final class WorkbenchViewModel {
       else { return }
       buckets = loadedBuckets
       loadedBucketConnectionID = selectedConnectionID
+      if let bucket = selectedBucket {
+        if loadedBuckets.contains(where: { $0.name == bucket }) {
+          await reloadObjects()
+        } else {
+          selectedBucket = nil
+          prefix = ""
+          history = [""]
+          historyIndex = 0
+        }
+      }
     } catch {
       guard bucketLoadGeneration == generation,
         self.selectedConnectionID == selectedConnectionID
@@ -172,6 +245,13 @@ final class WorkbenchViewModel {
       bucketErrorMessage = error.localizedDescription
       bucketErrorSecondaryMessage = serviceFailureCopy(for: error)
     }
+  }
+
+  private func restoreNavigation(_ navigation: ConnectionNavigation) {
+    selectedBucket = navigation.bucket
+    prefix = navigation.prefix
+    history = navigation.history
+    historyIndex = navigation.historyIndex
   }
 
   func openBucket(_ name: String) async {
@@ -386,6 +466,137 @@ final class WorkbenchViewModel {
     await task.value
   }
 
+  func cancelKeyNavigation() {
+    keyNavigationTask?.cancel()
+    keyNavigationTask = nil
+    keyNavigationID = nil
+    isResolvingObjectKey = false
+  }
+
+  func goToLocation(_ input: String) async {
+    let looksLikeURI = input.lowercased().hasPrefix("s3:/")
+      || input.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*://"#, options: .regularExpression) != nil
+    guard looksLikeURI else {
+      await goToObjectKey(input)
+      return
+    }
+    cancelKeyNavigation()
+    navigationErrorMessage = nil
+    guard let target = S3ObjectURI.parse(input) else {
+      navigationErrorMessage = "Enter a valid s3://bucket/key URI. Encode spaces and reserved characters."
+      return
+    }
+    guard let location, target.bucket.utf8.elementsEqual(location.bucket.utf8) else {
+      navigationErrorMessage = "This URI uses a different bucket. Select that bucket first."
+      return
+    }
+    await goToObjectKey(target.key)
+  }
+
+  func goToObjectKey(_ key: String) async {
+    cancelKeyNavigation()
+    navigationErrorMessage = nil
+    guard let origin = location else { return }
+    guard !key.isEmpty else {
+      navigationErrorMessage = "Enter an object key."
+      return
+    }
+    guard key.utf8.starts(with: accessRootPrefix.utf8),
+      accessRoot == nil || accessRoot?.bucket == origin.bucket
+    else {
+      navigationErrorMessage = "This key is outside the connection’s access root."
+      return
+    }
+    let id = UUID()
+    keyNavigationID = id
+    isResolvingObjectKey = true
+    let generation = objectLoadGeneration
+    let searchID = activeSearchContext?.id
+    let destination = ObjectLocation(
+      connectionID: origin.connectionID, bucket: origin.bucket, prefix: parentPrefix(of: key))
+    let task = Task { [weak self] in
+      guard let self else { return }
+      @MainActor func isCurrent() -> Bool {
+        !Task.isCancelled && self.keyNavigationID == id && self.location == origin
+          && self.objectLoadGeneration == generation && self.activeSearchContext?.id == searchID
+      }
+      defer {
+        if self.keyNavigationID == id {
+          self.isResolvingObjectKey = false
+          self.keyNavigationID = nil
+          self.keyNavigationTask = nil
+        }
+      }
+      do {
+        // Resolve the exact key before changing the browser, including real prefix-marker objects.
+        let target = ObjectRow(
+          id: ObjectRow.id(for: key, isPrefix: false), key: key,
+          displayName: String(decoding: key.utf8.dropFirst(destination.prefix.utf8.count), as: UTF8.self),
+          relativePath: "", size: 0, modifiedAt: nil, storageClass: nil, isPrefix: false)
+        let details = try await self.service.objectDetails(at: origin, object: target)
+        guard isCurrent() else { return }
+        var rows: [ObjectRow] = []
+        var token: String?
+        var seenTokens = Set<String>()
+        repeat {
+          let page = try await self.service.listObjects(at: destination, continuationToken: token)
+          guard isCurrent() else { return }
+          var pageRows = page.objects
+          token = page.continuationToken
+          // Delimited listings can omit real marker objects entirely. HEAD proved
+          // this exact object exists, so retain its object identity and metadata.
+          if key.utf8.last == 0x2F
+            && !pageRows.contains(where: { !$0.isPrefix && $0.key.utf8.elementsEqual(key.utf8) })
+          {
+            pageRows.append(ObjectRow(
+              id: target.id, key: key,
+              displayName: target.displayName.isEmpty ? key : target.displayName,
+              relativePath: "", size: details.size, modifiedAt: details.lastModified,
+              storageClass: details.storageClass, isPrefix: false))
+          }
+          rows.append(contentsOf: pageRows)
+          if let match = pageRows.first(where: {
+            $0.key.utf8.elementsEqual(key.utf8) && !$0.isPrefix
+          }) {
+            self.resetSearch(clearQuery: true)
+            self.navigate(to: destination.prefix)
+            self.objectLoadGeneration = UUID()
+            self.loadedObjectContext = ObjectLoadContext(location: destination)
+            self.invalidateLoadingIndicator(.objects)
+            self.invalidateLoadingIndicator(.pagination)
+            self.isLoadingObjects = false
+            self.isLoadingMore = false
+            self.objects = rows
+            self.continuationToken = token
+            self.seenObjectContinuationTokens = seenTokens
+            self.selectedObjectIDs = [match.id]
+            self.objectRevealRequestID = UUID()
+            self.objectDetails = details
+            self.objectErrorMessage = nil
+            self.objectErrorSecondaryMessage = nil
+            self.paginationErrorMessage = nil
+            self.paginationErrorSecondaryMessage = nil
+            return
+          }
+          if let token, !seenTokens.insert(token).inserted {
+            throw S3ServiceError.service("The server returned a repeated object pagination token.")
+          }
+        } while token != nil
+        throw S3ServiceError.notFound
+      } catch {
+        guard isCurrent() else { return }
+        self.navigationErrorMessage = (error as? S3ServiceError) == .notFound
+          ? "Object not found. Check the exact key and try again." : error.localizedDescription
+      }
+    }
+    keyNavigationTask = task
+    await withTaskCancellationHandler {
+      await task.value
+    } onCancel: {
+      task.cancel()
+    }
+  }
+
   func revealSelectedInPrefix() async {
     guard isSearchMode, let object = selectedObject else { return }
     let candidateIDs = object.key.hasSuffix("/")
@@ -406,6 +617,7 @@ final class WorkbenchViewModel {
     }
     if let revealed = objects.first(where: { candidateIDs.contains($0.id) }) {
       selectedObjectIDs = [revealed.id]
+      objectRevealRequestID = UUID()
     }
   }
 
@@ -449,8 +661,11 @@ final class WorkbenchViewModel {
     objectDetails = nil
     guard let location, let selectedObject, !selectedObject.isPrefix else { return }
     do {
-      objectDetails = try await service.objectDetails(at: location, object: selectedObject)
+      let details = try await service.objectDetails(at: location, object: selectedObject)
+      guard self.location == location, self.selectedObject?.id == selectedObject.id else { return }
+      objectDetails = details
     } catch {
+      guard self.location == location, self.selectedObject?.id == selectedObject.id else { return }
       errorMessage = error.localizedDescription
     }
   }
@@ -513,12 +728,23 @@ final class WorkbenchViewModel {
     try await service.testConnection(draft)
   }
 
-  func upload(_ urls: [URL], collisionPolicy: CollisionPolicy) async {
-    guard let location, !urls.isEmpty else { return }
+  func hasUploadConflicts(_ urls: [URL], at destination: ObjectLocation) async -> Bool? {
+    do {
+      return try await service.hasUploadConflicts(files: urls, to: destination)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func upload(
+    _ urls: [URL], to destination: ObjectLocation? = nil, collisionPolicy: CollisionPolicy
+  ) async {
+    guard let location = destination ?? location, !urls.isEmpty else { return }
     await perform {
       try await service.upload(files: urls, to: location, collisionPolicy: collisionPolicy)
       await refreshTransfers()
-      await reloadObjects()
+      if self.location == location { await reloadObjects() }
     }
   }
 
@@ -620,6 +846,18 @@ final class WorkbenchViewModel {
     }
   }
 
+  func copyObjectKey(_ object: ObjectRow? = nil, to pasteboard: NSPasteboard = .general) {
+    guard let object = object ?? selectedObject, !object.isPrefix else { return }
+    pasteboard.clearContents()
+    pasteboard.setString(object.key, forType: .string)
+  }
+
+  func copyS3URI(_ object: ObjectRow? = nil, to pasteboard: NSPasteboard = .general) {
+    guard let location, let object = object ?? selectedObject, !object.isPrefix else { return }
+    pasteboard.clearContents()
+    pasteboard.setString(S3ObjectURI.string(bucket: location.bucket, key: object.key), forType: .string)
+  }
+
   func previewSelected() async {
     guard let location, let selectedObject, !selectedObject.isPrefix else { return }
     do {
@@ -718,7 +956,8 @@ final class WorkbenchViewModel {
           at: context.location,
           query: context.query,
           continuationToken: nextSearchContinuationToken,
-          refreshIndex: context.refreshIndex && nextSearchContinuationToken == nil
+          refreshIndex: context.refreshIndex && nextSearchContinuationToken == nil,
+          searchID: context.id
         )
         try Task.checkCancellation()
         guard isActive(context), isSearching else {
@@ -766,7 +1005,7 @@ final class WorkbenchViewModel {
         discardStaleSearch(context)
         return
       }
-      await service.cancelObjectSearch(at: context.location)
+      await service.cancelObjectSearch(id: context.id)
       isSearching = false
       searchTask = nil
       stopLoadingIndicator(.search, id: context.id)
@@ -835,8 +1074,8 @@ final class WorkbenchViewModel {
   private func cancelRunningSearch() {
     guard let searchTask else { return }
     searchTask.cancel()
-    if let location = activeSearchContext?.location {
-      Task { await service.cancelObjectSearch(at: location) }
+    if let id = activeSearchContext?.id {
+      Task { await service.cancelObjectSearch(id: id) }
     }
   }
 
@@ -907,6 +1146,14 @@ final class WorkbenchViewModel {
     loadingIndicatorIDs[indicator] = nil
     visibleLoadingIndicators.remove(indicator)
   }
+}
+
+private struct ConnectionNavigation {
+  let connection: ConnectionRow
+  let bucket: String?
+  let prefix: String
+  let history: [String]
+  let historyIndex: Int
 }
 
 private enum LoadingIndicator: Hashable, Sendable {
