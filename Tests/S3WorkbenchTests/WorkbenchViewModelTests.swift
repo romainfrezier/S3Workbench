@@ -32,6 +32,132 @@ import Testing
 }
 
 @MainActor
+@Test func windowModelsShareConnectionsButKeepNavigationAndSelectionIndependent() async {
+  let first = restrictedConnection(id: UUID())
+  let second = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty))
+  let settings = WorkbenchViewModel(service: service)
+  let left = settings.makeWindowModel()
+  let right = settings.makeWindowModel()
+  await left.start()
+  await right.start()
+  await left.reloadConnection()
+  await right.reloadConnection()
+
+  left.navigate(to: "restricted/left/")
+  left.selectedObjectIDs = ["left-object"]
+  left.searchQuery = "left query"
+  right.selectedConnectionID = second.id
+  await right.reloadConnection()
+
+  #expect(left !== right)
+  #expect(left.selectedConnectionID == first.id)
+  #expect(left.prefix == "restricted/left/")
+  #expect(left.selectedObjectIDs == ["left-object"])
+  #expect(left.searchQuery == "left query")
+  #expect(right.prefix == "restricted/")
+  #expect(right.selectedObjectIDs.isEmpty)
+  #expect(right.searchQuery.isEmpty)
+
+  settings.connections.removeAll { $0.id == second.id }
+  right.reconcileConnections()
+  #expect(left.connections == [first])
+  #expect(right.connections == [first])
+  #expect(right.selectedConnectionID == first.id)
+  #expect(left.prefix == "restricted/left/")
+}
+
+@MainActor
+@Test func switchingConnectionsRestoresEachBucketPrefixAndHistory() async {
+  var first = restrictedConnection(id: UUID())
+  first.accessPath = nil
+  var second = restrictedConnection(id: UUID())
+  second.accessPath = nil
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty),
+    bucketListHandler: { _ in [BucketRow(name: "bucket", creationDate: nil)] })
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+  await model.reloadConnection()
+  await model.openBucket("bucket")
+  model.navigate(to: "first//café/")
+  model.navigate(to: "first//café/deeper/")
+  await model.reloadObjects()
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  await model.openBucket("bucket")
+  model.navigate(to: "second/")
+  await model.reloadObjects()
+
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.selectedBucket == "bucket")
+  #expect(model.prefix == "first//café/deeper/")
+  #expect(await service.lastObjectLocation == model.location)
+  await model.goBack()
+  #expect(model.prefix == "first//café/")
+
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  #expect(model.prefix == "second/")
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.prefix == "first//café/")
+  #expect(model.canGoForward)
+  await model.goForward()
+  #expect(model.prefix == "first//café/deeper/")
+}
+
+@MainActor
+@Test func restrictedConnectionRestoresLocationButDiscardsItWhenAccessRootChanges() async {
+  let first = restrictedConnection(id: UUID())
+  let second = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+  await model.reloadConnection()
+  model.navigate(to: "restricted/child//雪/")
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.prefix == "restricted/child//雪/")
+  #expect(await service.bucketListCallCount == 0)
+
+  model.connections[0].accessPath = "/other/safe"
+  await model.reloadConnection()
+  #expect(model.selectedBucket == "other")
+  #expect(model.prefix == "safe/")
+  #expect(model.history == ["safe/"])
+  #expect(!model.canGoBack)
+}
+
+@MainActor
+@Test func returningToConnectionAfterLeavingItsBucketKeepsTheBucketList() async {
+  var first = restrictedConnection(id: UUID())
+  first.accessPath = nil
+  let second = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(
+    connections: [first, second], listObjectsResult: .success(.empty),
+    bucketListHandler: { _ in [BucketRow(name: "bucket", creationDate: nil)] })
+  let model = WorkbenchViewModel(service: service)
+  await model.start()
+  await model.reloadConnection()
+  await model.openBucket("bucket")
+  model.navigate(to: "child/")
+  await model.navigateToRoot()
+  model.selectedConnectionID = second.id
+  await model.reloadConnection()
+  model.selectedConnectionID = first.id
+  await model.reloadConnection()
+  #expect(model.selectedBucket == nil)
+  #expect(model.prefix.isEmpty)
+  #expect(model.objects.isEmpty)
+}
+
+@MainActor
 @Test func movingConnectionsKeepsTheRequestedOrder() async throws {
   let first = restrictedConnection(id: UUID())
   let second = restrictedConnection(id: UUID())

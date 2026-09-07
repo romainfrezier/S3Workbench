@@ -672,6 +672,21 @@ actor CoreWorkbenchService: WorkbenchServing {
     )
   }
 
+  func hasUploadConflicts(files: [URL], to location: ObjectLocation) async throws -> Bool {
+    let service = try await s3Service(at: location)
+    for source in files {
+      try Task.checkCancellation()
+      do {
+        try await requireRemoteDestinationAvailable(
+          service: service, bucket: location.bucket,
+          key: location.prefix + source.lastPathComponent)
+      } catch let error as S3ServiceError where error.isConflict {
+        return true
+      }
+    }
+    return false
+  }
+
   func upload(
     files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy
   ) async throws {

@@ -5,8 +5,18 @@ import S3WorkbenchCore
 
 @MainActor
 @Observable
+final class WorkbenchConnections {
+  var rows: [ConnectionRow] = []
+}
+
+@MainActor
+@Observable
 final class WorkbenchViewModel {
-  var connections: [ConnectionRow] = []
+  private let connectionLibrary: WorkbenchConnections
+  var connections: [ConnectionRow] {
+    get { connectionLibrary.rows }
+    set { connectionLibrary.rows = newValue }
+  }
   var selectedConnectionID: UUID?
   var buckets: [BucketRow] = []
   var selectedBucket: String?
@@ -68,8 +78,25 @@ final class WorkbenchViewModel {
   @ObservationIgnored private var loadingIndicatorTasks: [LoadingIndicator: Task<Void, Never>] = [:]
   @ObservationIgnored private var loadingIndicatorIDs: [LoadingIndicator: UUID] = [:]
 
-  init(service: any WorkbenchServing) {
+  private var browsingConnection: ConnectionRow?
+  private var connectionNavigation: [UUID: ConnectionNavigation] = [:]
+
+  init(service: any WorkbenchServing, connections: WorkbenchConnections = WorkbenchConnections()) {
     self.service = service
+    self.connectionLibrary = connections
+  }
+
+  func makeWindowModel() -> WorkbenchViewModel {
+    WorkbenchViewModel(service: service, connections: connectionLibrary)
+  }
+
+  func reconcileConnections() {
+    connectionNavigation = connectionNavigation.filter { id, _ in
+      connections.contains { $0.id == id }
+    }
+    if !connections.contains(where: { $0.id == selectedConnectionID }) {
+      selectedConnectionID = connections.first?.id
+    }
   }
 
   var selectedConnection: ConnectionRow? {
@@ -126,11 +153,35 @@ final class WorkbenchViewModel {
   }
 
   func reloadConnection() async {
+    if let browsingConnection,
+      connections.contains(where: { $0.id == browsingConnection.id })
+    {
+      connectionNavigation[browsingConnection.id] = ConnectionNavigation(
+        connection: browsingConnection, bucket: selectedBucket, prefix: prefix,
+        history: history, historyIndex: historyIndex)
+    }
+    browsingConnection = selectedConnection
+    let saved = selectedConnectionID.flatMap { connectionNavigation[$0] }
+    let restoresLocation = saved?.connection.endpoint == selectedConnection?.endpoint
+      && saved?.connection.accessPath == selectedConnection?.accessPath
+    let navigation = restoresLocation ? saved : nil
     let generation = UUID()
     bucketLoadGeneration = generation
     invalidateLoadingIndicator(.buckets)
     isLoadingBuckets = false
     resetSearch(clearQuery: true)
+    objectLoadGeneration = UUID()
+    loadedObjectContext = nil
+    invalidateLoadingIndicator(.objects)
+    invalidateLoadingIndicator(.pagination)
+    isLoadingObjects = false
+    isLoadingMore = false
+    continuationToken = nil
+    objectErrorMessage = nil
+    objectErrorSecondaryMessage = nil
+    paginationErrorMessage = nil
+    paginationErrorSecondaryMessage = nil
+    previewURL = nil
     selectedBucket = nil
     prefix = ""
     objects = []
@@ -149,10 +200,17 @@ final class WorkbenchViewModel {
       selectedBucket = accessRoot.bucket
       prefix = accessRoot.prefix
       history = [accessRoot.prefix]
+      if let navigation, navigation.bucket == accessRoot.bucket,
+        navigation.prefix.utf8.starts(with: accessRoot.prefix.utf8),
+        navigation.history.allSatisfy({ $0.utf8.starts(with: accessRoot.prefix.utf8) })
+      {
+        restoreNavigation(navigation)
+      }
       await reloadObjects()
       return
     }
     if loadedBucketConnectionID != selectedConnectionID { buckets = [] }
+    if let navigation { restoreNavigation(navigation) }
     isLoadingBuckets = true
     let loadingID = startLoadingIndicator(.buckets)
     defer {
@@ -165,6 +223,16 @@ final class WorkbenchViewModel {
       else { return }
       buckets = loadedBuckets
       loadedBucketConnectionID = selectedConnectionID
+      if let bucket = selectedBucket {
+        if loadedBuckets.contains(where: { $0.name == bucket }) {
+          await reloadObjects()
+        } else {
+          selectedBucket = nil
+          prefix = ""
+          history = [""]
+          historyIndex = 0
+        }
+      }
     } catch {
       guard bucketLoadGeneration == generation,
         self.selectedConnectionID == selectedConnectionID
@@ -172,6 +240,13 @@ final class WorkbenchViewModel {
       bucketErrorMessage = error.localizedDescription
       bucketErrorSecondaryMessage = serviceFailureCopy(for: error)
     }
+  }
+
+  private func restoreNavigation(_ navigation: ConnectionNavigation) {
+    selectedBucket = navigation.bucket
+    prefix = navigation.prefix
+    history = navigation.history
+    historyIndex = navigation.historyIndex
   }
 
   func openBucket(_ name: String) async {
@@ -513,12 +588,23 @@ final class WorkbenchViewModel {
     try await service.testConnection(draft)
   }
 
-  func upload(_ urls: [URL], collisionPolicy: CollisionPolicy) async {
-    guard let location, !urls.isEmpty else { return }
+  func hasUploadConflicts(_ urls: [URL], at destination: ObjectLocation) async -> Bool? {
+    do {
+      return try await service.hasUploadConflicts(files: urls, to: destination)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func upload(
+    _ urls: [URL], to destination: ObjectLocation? = nil, collisionPolicy: CollisionPolicy
+  ) async {
+    guard let location = destination ?? location, !urls.isEmpty else { return }
     await perform {
       try await service.upload(files: urls, to: location, collisionPolicy: collisionPolicy)
       await refreshTransfers()
-      await reloadObjects()
+      if self.location == location { await reloadObjects() }
     }
   }
 
@@ -907,6 +993,14 @@ final class WorkbenchViewModel {
     loadingIndicatorIDs[indicator] = nil
     visibleLoadingIndicators.remove(indicator)
   }
+}
+
+private struct ConnectionNavigation {
+  let connection: ConnectionRow
+  let bucket: String?
+  let prefix: String
+  let history: [String]
+  let historyIndex: Int
 }
 
 private enum LoadingIndicator: Hashable, Sendable {
