@@ -9,9 +9,9 @@ struct GoToLocationView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       Text("Go to Location").font(.headline)
-      Text("Enter the exact object key in the current bucket. Spaces and slashes are preserved.")
+      Text("Enter an exact object key or s3:// URI for the current bucket. Spaces and slashes in keys are preserved.")
         .foregroundStyle(.secondary)
-      TextField("Object key", text: $key)
+      TextField("Object key or s3:// URI", text: $key)
         .textFieldStyle(.roundedBorder)
         .autocorrectionDisabled()
         .focused($isKeyFocused)

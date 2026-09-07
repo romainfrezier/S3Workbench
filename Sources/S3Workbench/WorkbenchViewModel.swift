@@ -50,6 +50,7 @@ final class WorkbenchViewModel {
   var history: [String] = [""]
   var historyIndex = 0
   private(set) var isResolvingObjectKey = false
+  private(set) var objectRevealRequestID = UUID()
   var navigationErrorMessage: String?
   private var keyNavigationID: UUID?
   private var keyNavigationTask: Task<Void, Never>?
@@ -397,6 +398,26 @@ final class WorkbenchViewModel {
     isResolvingObjectKey = false
   }
 
+  func goToLocation(_ input: String) async {
+    let looksLikeURI = input.lowercased().hasPrefix("s3:/")
+      || input.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*://"#, options: .regularExpression) != nil
+    guard looksLikeURI else {
+      await goToObjectKey(input)
+      return
+    }
+    cancelKeyNavigation()
+    navigationErrorMessage = nil
+    guard let target = S3ObjectURI.parse(input) else {
+      navigationErrorMessage = "Enter a valid s3://bucket/key URI. Encode spaces and reserved characters."
+      return
+    }
+    guard let location, target.bucket.utf8.elementsEqual(location.bucket.utf8) else {
+      navigationErrorMessage = "This URI uses a different bucket. Select that bucket first."
+      return
+    }
+    await goToObjectKey(target.key)
+  }
+
   func goToObjectKey(_ key: String) async {
     cancelKeyNavigation()
     navigationErrorMessage = nil
@@ -474,6 +495,7 @@ final class WorkbenchViewModel {
             self.continuationToken = token
             self.seenObjectContinuationTokens = seenTokens
             self.selectedObjectIDs = [match.id]
+            self.objectRevealRequestID = UUID()
             self.objectDetails = details
             self.objectErrorMessage = nil
             self.objectErrorSecondaryMessage = nil
@@ -520,6 +542,7 @@ final class WorkbenchViewModel {
     }
     if let revealed = objects.first(where: { candidateIDs.contains($0.id) }) {
       selectedObjectIDs = [revealed.id]
+      objectRevealRequestID = UUID()
     }
   }
 

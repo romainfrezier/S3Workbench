@@ -26,4 +26,38 @@ func objectURIEncodesAndRoundTripsExactKey(key: String, encodedKey: String) thro
     #expect(components.fragment == nil)
     let decodedKey = try #require(String(components.percentEncodedPath.dropFirst()).removingPercentEncoding)
     #expect(Array(decodedKey.utf8) == Array(key.utf8))
+    if key.isEmpty {
+        #expect(S3ObjectURI.parse(uri) == nil)
+    } else {
+        let parsed = try #require(S3ObjectURI.parse(uri))
+        #expect(parsed.bucket == bucket)
+        #expect(Array(parsed.key.utf8) == Array(key.utf8))
+    }
+}
+
+@Test(arguments: [
+    ("s3://bucket/%2Ffolder%2F%2Ffile%2F", "bucket", "/folder//file/"),
+    ("S3://Bucket/./folder/../file", "Bucket", "./folder/../file"),
+    ("s3://%62ucket/literal%252Fslash", "bucket", "literal%2Fslash"),
+    ("s3://bucket//", "bucket", "/")
+])
+func objectURIParsesWithoutNormalizing(uri: String, bucket: String, key: String) throws {
+    let parsed = try #require(S3ObjectURI.parse(uri))
+    #expect(parsed.bucket == bucket)
+    #expect(Array(parsed.key.utf8) == Array(key.utf8))
+}
+
+@Test(arguments: [
+    "", "s3://", "s3:///key", "s3://bucket", "s3://bucket/", "s3:/bucket/key",
+    "https://bucket/key", "s3:bucket/key", "//bucket/key", " s3://bucket/key",
+    "s3://user@bucket/key", "s3://user:password@bucket/key", "s3://bucket:9000/key",
+    "s3://[::1]/key", "s3://bucket/key?query", "s3://bucket/key#fragment",
+    "s3://bucket/key?", "s3://bucket/key#", "s3://bucket/a b", "s3://bucket/été",
+    "s3://bucket/line\nbreak", "s3://bucket/a\\b", "s3://bucket/file%", "s3://bucket/%1",
+    "s3://bucket/%GG", "s3://bucket/%FF", "s3://bucket/%C3%28", "s3://bucket/%ED%A0%80",
+    "s3://buck%FFet/key", "s3://buck%20et/key", "s3://buck%2Fet/key", "s3://user%40bucket/key",
+    "s3://bucket%3A9000/key", "s3://bucket%00/key"
+])
+func objectURIRejectsMalformedInput(uri: String) {
+    #expect(S3ObjectURI.parse(uri) == nil)
 }

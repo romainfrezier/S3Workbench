@@ -43,10 +43,13 @@ Most desktop S3 tools either assume AWS endpoints or feel like generic file-tran
 - Configure arbitrary servers without embedding a protocol, plus HTTPS, port, region, and addressing settings.
 - Open an optional `/bucket/prefix` access path directly when credentials cannot list every bucket.
 - Browse buckets and prefixes with native macOS tables, navigation, search, inspector, keyboard commands, and Quick Look.
+- Copy exact object keys or portable S3 URIs, and use **Navigate → Go to Location…** (`⇧⌘G`) to open either within the current bucket.
 - Upload, stream downloads, delete, move, drag and drop, inspect metadata, and create presigned URLs.
 - Choose Keep Both, Replace, or Cancel before a transfer or move can overwrite a destination.
 - Track transfers with progress, cancellation, retry, and bounded-memory multipart uploads.
 - Keep credentials out of configuration files and logs.
+
+Go to Location preserves exact key bytes and respects the connection's access root. URI input uses `s3://bucket/encoded-key`; use **Copy S3 URI** for spaces, Unicode, reserved characters, or keys that themselves look like URIs. It never switches buckets or connections automatically. Successful navigation and **Reveal in Prefix** scroll the selected object into view.
 
 ## Compatibility
 

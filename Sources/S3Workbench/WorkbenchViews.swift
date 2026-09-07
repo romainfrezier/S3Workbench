@@ -50,7 +50,7 @@ struct WorkbenchRootView: View {
     .sheet(isPresented: $isGoToLocationPresented) {
       GoToLocationView { key in
         isGoToLocationPresented = false
-        Task { await model.goToObjectKey(key) }
+        Task { await model.goToLocation(key) }
       }
     }
     .safeAreaInset(edge: .top) {
@@ -556,6 +556,16 @@ private struct ObjectBrowserView: View {
   }
 
   var body: some View {
+    ScrollViewReader { proxy in
+      table
+        .onChange(of: model.objectRevealRequestID) { _, _ in
+          guard let object = model.selectedObject else { return }
+          proxy.scrollTo(object.id, anchor: .center)
+        }
+    }
+  }
+
+  private var table: some View {
     Table(displayedObjects, selection: $model.selectedObjectIDs, sortOrder: $sortOrder) {
       TableColumn("Name", sortUsing: ObjectSortComparator(column: .name)) { object in
         if object.isPrefix {

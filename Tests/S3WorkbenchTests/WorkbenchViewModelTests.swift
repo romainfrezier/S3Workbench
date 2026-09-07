@@ -40,7 +40,8 @@ import Testing
 }
 
 @MainActor
-@Test func goToKeyFollowsPaginationAndSelectsTheByteExactObject() async throws {
+@Test(arguments: [false, true])
+func goToKeyFollowsPaginationAndSelectsTheByteExactObject(useURI: Bool) async throws {
   let key = "restricted//nested/e\u{301} #?% .txt "
   let equivalent = searchObject(id: "composed", key: "restricted//nested/é #?% .txt ")
   let target = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
@@ -64,10 +65,12 @@ import Testing
   model.selectedBucket = "bucket"
   model.prefix = "restricted/current/"
 
-  await model.goToObjectKey(key)
+  let previousReveal = model.objectRevealRequestID
+  await model.goToLocation(useURI ? S3ObjectURI.string(bucket: "bucket", key: key) : key)
 
   #expect(model.prefix == "restricted//nested/")
   #expect(model.selectedObjectIDs == [target.id])
+  #expect(model.objectRevealRequestID != previousReveal)
   #expect(model.objects == [equivalent, target])
   #expect(model.continuationToken == "page-3")
   #expect(model.navigationErrorMessage == nil)
@@ -123,8 +126,8 @@ func goToKeyFailureKeepsTheExistingLocationAndSelection(error: S3ServiceError) a
 }
 
 @MainActor
-@Test(arguments: ["cancel", "connection", "bucket", "prefix", "input"])
-func goToKeyRejectsLateResolutionWhenItsContextChanges(change: String) async {
+@Test(arguments: ["cancel", "connection", "bucket", "prefix", "input"], [false, true])
+func goToKeyRejectsLateResolutionWhenItsContextChanges(change: String, useURI: Bool) async {
   let gate = GoToKeyGate()
   let service = StubWorkbenchService(
     connections: [], listObjectsResult: .success(.empty),
@@ -133,7 +136,8 @@ func goToKeyRejectsLateResolutionWhenItsContextChanges(change: String) async {
   model.selectedConnectionID = UUID()
   model.selectedBucket = "bucket"
   model.prefix = "current/"
-  let task = Task { await model.goToObjectKey("target/file") }
+  let previousReveal = model.objectRevealRequestID
+  let task = Task { await model.goToLocation(useURI ? "s3://bucket/target/file" : "target/file") }
   for _ in 0..<10_000 {
     if await gate.started { break }
     await Task.yield()
@@ -143,7 +147,7 @@ func goToKeyRejectsLateResolutionWhenItsContextChanges(change: String) async {
   case "connection": model.selectedConnectionID = UUID()
   case "bucket": model.selectedBucket = "other"
   case "prefix": model.prefix = "elsewhere/"
-  case "input": await model.goToObjectKey("")
+  case "input": await model.goToLocation("s3://other-bucket/file")
   default: task.cancel()
   }
   let expected = model.location
@@ -153,6 +157,33 @@ func goToKeyRejectsLateResolutionWhenItsContextChanges(change: String) async {
   #expect(model.objects.isEmpty)
   #expect(await service.lastObjectLocation == nil)
   #expect(!model.isResolvingObjectKey)
+  #expect(model.objectRevealRequestID == previousReveal)
+}
+
+@MainActor
+@Test(arguments: ["s3://other/restricted/file", "s3://bucket/elsewhere/file",
+  "s3://bucket/restricted/%ZZ", "https://bucket/restricted/file", "s3:/bucket/file"])
+func invalidOrOutOfScopeURIsKeepTheBrowserUntouched(input: String) async {
+  let connection = restrictedConnection(id: UUID())
+  let service = StubWorkbenchService(connections: [connection], listObjectsResult: .success(.empty))
+  let model = WorkbenchViewModel(service: service)
+  model.connections = [connection]
+  model.selectedConnectionID = connection.id
+  model.selectedBucket = "bucket"
+  model.prefix = "restricted/current/"
+  let object = searchObject(id: "previous", key: "restricted/current/previous.txt")
+  model.objects = [object]
+  model.select(object)
+  let previousLocation = model.location
+  let previousReveal = model.objectRevealRequestID
+  await model.goToLocation(input)
+  #expect(model.location == previousLocation)
+  #expect(model.selectedObjectIDs == [object.id])
+  #expect(model.objects == [object])
+  #expect(model.objectRevealRequestID == previousReveal)
+  #expect(model.navigationErrorMessage != nil)
+  #expect(await service.objectDetailsKeys.isEmpty)
+  #expect(await service.lastObjectLocation == nil)
 }
 
 @MainActor
@@ -199,6 +230,25 @@ func goToKeyPreservesTrailingSlashMarkers(atAccessRoot: Bool, omittedByListing: 
   #expect(model.selectedObject?.key == key)
   #expect(model.selectedObject?.isPrefix == false)
   #expect(model.selectedObject?.size == goToKeyDetails.size)
+  #expect(model.navigationErrorMessage == nil)
+}
+
+@MainActor
+@Test(arguments: ["s3:archive/log.txt", "notes://literal/file", "folder/s3://literal/file"])
+func goToLocationPreservesColonKeys(key: String) async {
+  let target = searchObject(id: ObjectRow.id(for: key, isPrefix: false), key: key)
+  let service = StubWorkbenchService(
+    connections: [], listObjectsResult: .success(ObjectPage(objects: [target], continuationToken: nil)),
+    objectDetailsHandler: { _, object in
+      #expect(object.key.utf8.elementsEqual(key.utf8))
+      return goToKeyDetails
+    })
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  // URI-shaped keys remain addressable as the key component of an S3 URI.
+  await model.goToLocation(key.hasPrefix("notes://") ? S3ObjectURI.string(bucket: "bucket", key: key) : key)
+  #expect(model.selectedObject?.key == key)
   #expect(model.navigationErrorMessage == nil)
 }
 
@@ -1435,7 +1485,7 @@ private actor GoToKeyGate {
   try await markerService.uploadFile(
     from: markerSource, bucket: bucket, key: markerKey, contentType: nil, metadata: [:], progress: nil)
   #expect(try await markerService.metadata(bucket: bucket, key: markerKey).size == 6)
-  await model.goToObjectKey(markerKey)
+  await model.goToLocation(S3ObjectURI.string(bucket: bucket, key: markerKey))
   await MainActor.run {
     #expect(model.prefix == "recursive-search/")
     #expect(model.selectedObject?.key == markerKey)
