@@ -1,11 +1,65 @@
 # Packaging and distribution
 
+## Homebrew installation and updates
+
+The personal [tap](https://github.com/romainfrezier/homebrew-s3workbench) distributes
+the same Apple Silicon DMG as GitHub Releases, with a versioned URL and SHA-256:
+
+```sh
+brew tap romainfrezier/s3workbench
+brew install --cask s3-workbench
+brew update
+brew upgrade --cask s3-workbench
+```
+
+It requires macOS 15 or later. Homebrew upgrades the app bundle without removing
+saved connections, preferences, local indexes or Keychain credentials. The cask
+has no custom installer, credential handling or `zap` cleanup. An ordinary
+`brew uninstall --cask s3-workbench` also leaves saved app data in place.
+
+Homebrew delivery is separate from Developer ID signing, Apple notarization and
+Gatekeeper approval. The current release is ad-hoc signed and not notarized;
+installing through Homebrew does not change that. S3Workbench has no Sparkle or
+other in-app updater. Manual [release DMGs](https://github.com/romainfrezier/S3Workbench/releases/latest)
+remain available.
+
+## Update the Homebrew cask after a release
+
+Publish and verify the tag-CI assets using the release procedure below first.
+Then download both published files into a new directory and verify the checksum:
+
+```sh
+VERSION=0.7.0 # Example: replace with the newly published release.
+gh release download "v$VERSION" --repo romainfrezier/S3Workbench \
+  --pattern "S3Workbench-$VERSION.dmg*" --dir "release-$VERSION"
+(cd "release-$VERSION" && shasum -a 256 -c "S3Workbench-$VERSION.dmg.sha256")
+```
+
+In the tap's [Casks/s3-workbench.rb](https://github.com/romainfrezier/homebrew-s3workbench/blob/main/Casks/s3-workbench.rb),
+update `version` and `sha256` from those verified assets. Its interpolated URL
+already includes the version; change that URL only if the asset naming changes.
+Keep the immutable version URL and checksum: never use `latest` or `:no_check`.
+
+Open a tap pull request, link the release, and run:
+
+```sh
+brew audit --cask --strict romainfrezier/s3workbench/s3-workbench
+brew style Casks/s3-workbench.rb
+```
+
+Run those commands against the candidate in the installed tap checkout, not an
+unrelated clone. The tap's Cask workflow tests the exact candidate, including
+fresh installation, upgrade from 0.6.0 with disposable app-data/Keychain sentinels,
+and rejection of an incorrect checksum. Review that evidence before merging.
+Hosted-runner installation is separate from interactive app launch, Gatekeeper
+approval and access to a user's existing Keychain; report those checks separately.
+
 ## Build an arm64 app and DMG
 
 Requirements: an Apple Silicon Mac, Xcode 26 or later, and the macOS 15 SDK.
 
 ```sh
-VERSION=0.4.0
+VERSION=0.7.0 # Example: use the version being built or published.
 MARKETING_VERSION="$VERSION" scripts/package-dmg.sh
 MARKETING_VERSION="$VERSION" scripts/verify-dmg.sh
 (cd dist && shasum -a 256 -c "S3Workbench-$VERSION.dmg.sha256")
@@ -20,7 +74,7 @@ Set `LAUNCH_TEST=1` on `verify-dmg.sh` to add a local launch/quit smoke test. A 
 Create and push the annotated tag only from the intended, green `main` commit. After the tag workflow succeeds, download its two assets and verify them before publication:
 
 ```sh
-VERSION=0.4.0
+VERSION=0.7.0 # Example: use the version being built or published.
 git tag -a "v$VERSION" -m "S3Workbench $VERSION"
 git push origin "v$VERSION"
 gh run list --workflow CI --branch "v$VERSION"
@@ -38,7 +92,7 @@ gh release create "v$VERSION" \
 Install a `Developer ID Application` certificate and store notarization credentials without putting secrets in scripts:
 
 ```sh
-VERSION=0.4.0
+VERSION=0.7.0 # Example: use the version being built or published.
 xcrun notarytool store-credentials s3workbench-notary \
   --apple-id you@example.com \
   --team-id TEAMID \
@@ -56,7 +110,7 @@ The package script signs the app with Hardened Runtime and a secure timestamp, s
 Useful independent checks:
 
 ```sh
-VERSION=0.4.0
+VERSION=0.7.0 # Example: use the version being built or published.
 codesign --verify --deep --strict --verbose=4 .build/distribution/S3Workbench.app
 codesign -dvvv .build/distribution/S3Workbench.app
 xcrun stapler validate "dist/S3Workbench-$VERSION.dmg"

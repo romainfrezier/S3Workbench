@@ -68,11 +68,38 @@ Compatibility claims are deliberately conservative: only MinIO is covered by the
 
 S3Workbench requires macOS 15 or later on Apple Silicon.
 
+### Homebrew
+
+Use the personal [Homebrew tap](https://github.com/romainfrezier/homebrew-s3workbench):
+
+```sh
+brew tap romainfrezier/s3workbench
+brew install --cask s3-workbench
+```
+
+To upgrade:
+
+```sh
+brew update
+brew upgrade --cask s3-workbench
+```
+
+The [cask](https://github.com/romainfrezier/homebrew-s3workbench/blob/main/Casks/s3-workbench.rb)
+uses the versioned release DMG and verifies its SHA-256. Upgrades preserve saved
+profiles, preferences, local indexes and Keychain credentials. Homebrew provides
+the update command; S3Workbench has no in-app updater.
+
+### Manual DMG
+
 1. Download the versioned `S3Workbench-X.Y.Z.dmg` and checksum from the [latest release](https://github.com/romainfrezier/S3Workbench/releases/latest), then verify them with `shasum -a 256 -c S3Workbench-X.Y.Z.dmg.sha256`.
 2. Open the disk image and drag S3Workbench to Applications.
 3. Launch the app and add your first connection.
 
-The current community build is ad-hoc signed because no Developer ID identity is available. macOS may require **Control-click → Open** on first launch. See [Packaging and distribution](docs/PACKAGING.md) for the exact Gatekeeper limitation and notarized-build workflow.
+Both installation methods use the same ad-hoc-signed, unnotarized community build.
+Homebrew does not grant Developer ID trust or bypass Gatekeeper. If macOS blocks
+first launch, review it through the standard **Privacy & Security** controls.
+See [Packaging and distribution](docs/PACKAGING.md) for distribution limits and
+the notarized-build workflow.
 
 ## Connection model
 
@@ -129,7 +156,7 @@ Requirements:
 ```sh
 swift test
 scripts/integration-test.sh
-VERSION=0.4.0
+VERSION=0.7.0 # Example: use the version you are building.
 MARKETING_VERSION="$VERSION" scripts/package-dmg.sh
 MARKETING_VERSION="$VERSION" LAUNCH_TEST=1 scripts/verify-dmg.sh
 ```
