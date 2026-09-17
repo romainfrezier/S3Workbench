@@ -7,6 +7,7 @@ the same Apple Silicon DMG as GitHub Releases, with a versioned URL and SHA-256:
 
 ```sh
 brew tap romainfrezier/s3workbench
+brew trust --cask romainfrezier/s3workbench/s3-workbench
 brew install --cask s3-workbench
 brew update
 brew upgrade --cask s3-workbench
