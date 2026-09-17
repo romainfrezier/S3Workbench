@@ -11,7 +11,7 @@ const routes = ['/', '/download/', '/compatibility/', '/security/']
 const metadata = {
   '/': { title: 'S3Workbench — Browse object storage like a native Mac app', description: 'A native macOS browser for S3-compatible object storage, with Finder-like navigation, recursive search and a clear metadata inspector.' },
   '/download/': { title: 'Download S3Workbench — Native S3 browser for macOS', description: 'Download S3Workbench for macOS 15 or later on Apple Silicon and browse S3-compatible storage from a focused native Mac app.' },
-  '/compatibility/': { title: 'S3-compatible storage compatibility — S3Workbench', description: 'See how S3Workbench handles MinIO, AWS S3, Cloudflare R2, Wasabi, Backblaze B2 and private S3-compatible endpoints.' },
+  '/compatibility/': { title: 'S3-compatible storage compatibility — S3Workbench', description: 'See how S3Workbench handles MinIO, RustFS, AWS S3, Cloudflare R2, Wasabi, Backblaze B2 and private S3-compatible endpoints.' },
   '/security/': { title: 'Security and privacy — S3Workbench', description: 'S3Workbench keeps credentials in macOS Keychain, uses system TLS trust and redacts secrets from errors and logs.' },
 }
 
