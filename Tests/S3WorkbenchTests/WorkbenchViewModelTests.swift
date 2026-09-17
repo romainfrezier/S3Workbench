@@ -128,7 +128,7 @@ func goToKeyFailureKeepsTheExistingLocationAndSelection(error: S3ServiceError) a
 @MainActor
 @Test(arguments: ["cancel", "connection", "bucket", "prefix", "input"], [false, true])
 func goToKeyRejectsLateResolutionWhenItsContextChanges(change: String, useURI: Bool) async {
-  let gate = GoToKeyGate()
+  let gate = ResponseGate()
   let service = StubWorkbenchService(
     connections: [], listObjectsResult: .success(.empty),
     objectDetailsHandler: { _, _ in await gate.wait(); return goToKeyDetails })
@@ -255,7 +255,7 @@ func goToLocationPreservesColonKeys(key: String) async {
 private let goToKeyDetails = ObjectDetails(
   contentType: nil, eTag: nil, lastModified: nil, size: 1, storageClass: nil, metadata: [:], headers: [:])
 
-private actor GoToKeyGate {
+private actor ResponseGate {
   var started = false
   private var released = false
   private var continuation: CheckedContinuation<Void, Never>?
@@ -1791,12 +1791,13 @@ private actor GoToKeyGate {
 
 @MainActor
 @Test func staleSearchPageCannotChangeANewPrefix() async {
+  let gate = ResponseGate()
   let stale = searchObject(id: "stale", key: "restricted/stale.txt")
   let service = StubWorkbenchService(
     connections: [],
     listObjectsResult: .success(.empty)
   ) { _, _, _ in
-    try? await Task.sleep(for: .milliseconds(50))
+    await gate.wait()
     return ObjectSearchPage(objects: [stale], scannedObjectCount: 1, continuationToken: nil)
   }
   let model = WorkbenchViewModel(service: service)
@@ -1809,6 +1810,7 @@ private actor GoToKeyGate {
   let started = await waitForSearchCall(service)
   #expect(started)
   model.prefix = "restricted/new-prefix/"
+  await gate.release()
   await task.value
 
   #expect(model.objects.isEmpty)
@@ -1817,6 +1819,7 @@ private actor GoToKeyGate {
 
 @MainActor
 @Test func latePageFromAnOldSearchCannotReplaceNewSearchResults() async {
+  let gate = ResponseGate()
   let stale = searchObject(id: "stale", key: "stale.txt")
   let current = searchObject(id: "current", key: "current.txt")
   let service = StubWorkbenchService(
@@ -1824,7 +1827,7 @@ private actor GoToKeyGate {
     listObjectsResult: .success(.empty)
   ) { _, query, _ in
     if query == "old" {
-      try? await Task.sleep(for: .milliseconds(50))
+      await gate.wait()
       return ObjectSearchPage(objects: [stale], scannedObjectCount: 1, continuationToken: nil)
     }
     return ObjectSearchPage(objects: [current], scannedObjectCount: 1, continuationToken: nil)
@@ -1839,6 +1842,7 @@ private actor GoToKeyGate {
   #expect(started)
   model.searchQuery = "new"
   await model.startSearch()
+  await gate.release()
   await oldSearch.value
 
   #expect(model.activeSearchQuery == "new")

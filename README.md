@@ -6,7 +6,7 @@
 
 <p align="center">
   A native macOS browser for S3-compatible object storage.<br>
-  Finder-like navigation with the clarity of a professional database tool.
+  Browse buckets, search across prefixes, and transfer files from your Mac.
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 Connect your S3 workspaces with independent endpoints, regions and access roots.
 Keep credentials in macOS Keychain and your everyday workflow in one native app.
 
-## Your storage, at a glance
+## Screenshots
 
 <p align="center">
   <img src="docs/screenshots/object-browser.jpg" width="1120" alt="S3Workbench browsing a local S3 bucket with the metadata inspector open">
@@ -34,7 +34,7 @@ Real S3Workbench 0.7.0 windows, shown with synthetic demo data.
 
 ## Why S3Workbench?
 
-Most desktop S3 tools either assume AWS endpoints or feel like generic file-transfer utilities. S3Workbench is built for people who move between MinIO, RustFS, private infrastructure, and hosted object storage every day.
+S3Workbench brings your MinIO, RustFS, private infrastructure, and hosted object storage into one native macOS app. Save your connections and use the same browsing, search, and transfer tools for each one.
 
 - Save and switch between multiple independent storage connections.
 - Color-code and duplicate saved connections.
@@ -52,8 +52,8 @@ Go to Location preserves exact key bytes and respects the connection's access ro
 
 ## Compatibility
 
-**One native Mac workflow for your S3 storage.** Connect to hosted object storage,
-local development servers, or your own infrastructure with the same browser.
+Connect to hosted object storage, local development servers, or your own
+infrastructure using a configurable S3 endpoint.
 
 | Storage | Connection setup |
 | --- | --- |
