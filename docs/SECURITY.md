@@ -4,10 +4,6 @@
 
 Security fixes are provided for the latest published release.
 
-| Version | Supported |
-| --- | --- |
-| 0.4.x | ✅ |
-
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected vulnerability and do not include real credentials, signed requests, presigned URLs, private endpoints, or object names in reports.
