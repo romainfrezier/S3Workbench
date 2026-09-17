@@ -81,6 +81,7 @@ Use the personal [Homebrew tap](https://github.com/romainfrezier/homebrew-s3work
 
 ```sh
 brew tap romainfrezier/s3workbench
+brew trust --cask romainfrezier/s3workbench/s3-workbench
 brew install --cask s3-workbench
 ```
 
