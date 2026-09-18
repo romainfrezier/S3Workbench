@@ -14,7 +14,7 @@ RUN npm run build
 
 FROM nginx:1.29.8-alpine
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /site/dist-server/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /site/dist /usr/share/nginx/html
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD wget --spider --quiet http://127.0.0.1/healthz || exit 1
