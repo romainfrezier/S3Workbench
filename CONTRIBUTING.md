@@ -69,11 +69,47 @@ resolved conversations; force pushes and deletion are disabled. The policy
 checks branch routing, not test results. Component CI and CodeQL remain scoped
 by changed paths and must be reviewed before merging. They are not globally
 required checks because a path-skipped workflow would block unrelated PRs.
-No second maintainer's approval is required for this solo-maintainer repository.
+Romain can merge his own PRs without another maintainer's approval, using the
+PR-only exception described below; the existing branch protections still apply.
 Automatic branch deletion is disabled so release/hotfix branches survive until
 their back-merges are complete.
 
 ## Pull requests
+
+### Maintainer validation
+
+Romain Frezier (`@romainfrezier`) must personally review the final diff and the
+validation evidence before a PR is merged. Passing CI, an automated review or
+an agent's summary does not replace that decision. Any later code change needs
+another review of the updated diff and its checks.
+
+Only Romain's GitHub account can merge into `main` or `develop`. The
+**Maintainer-controlled merges** ruleset restricts branch updates and requires
+review, with a PR-only bypass assigned to his account. Romain can use that
+exception to merge his own PRs without an impossible self-approval. It does not
+bypass the separate protections requiring the Gitflow check, resolved
+conversations and a PR, or allow force pushes or branch deletion.
+
+Contributors and Dependabot may open PRs; they do not have to impersonate Romain
+or recreate their PRs under his account. `.github/CODEOWNERS` designates him as
+the reviewer for all files. He reviews other authors' PRs and decides whether to
+merge them. Auto-merge is disabled for the repository.
+
+Agents may prepare changes, run checks and report results, but must wait for
+Romain's explicit approval of the final PR before merging. They must not submit
+an approval using his authenticated account on his behalf.
+
+GitHub identifies the authenticated account, so a tool using Romain's credentials
+has the same permissions. The instruction to wait for his human approval still
+applies to agents; the account-level rule cannot distinguish a person from their
+token.
+
+Publishing a release/tag or deploying to production also requires Romain's
+explicit instruction for that operation. Approval to prepare or merge a PR is
+not permission to release or deploy. Publishing a website container image in CI
+does not by itself deploy it to the production server.
+
+### Preparing a contribution
 
 1. For planned features, work from a scoped issue and link it from the pull request.
 2. Fork the repository if needed and create a focused branch using the Gitflow table above.

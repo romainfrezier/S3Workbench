@@ -16,6 +16,11 @@ repository target `main`. Use merge commits, retain release/hotfix branches
 until back-merges are complete, and never reset or force-push shared branches.
 Check all applicable CI and CodeQL results on the exact PR head before merging;
 the Gitflow branch-policy check validates routing only.
+Romain must personally validate the final diff and checks before merging.
+Never submit an approving review under his account on his behalf. Wait for his
+explicit approval of the final PR; passing CI alone is not merge authorization.
+Do not enable auto-merge. Releases, release tags and production deployments
+require his explicit instruction for that operation, separately from PR work.
 
 ## Product guardrails
 
