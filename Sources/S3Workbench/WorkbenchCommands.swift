@@ -3,40 +3,48 @@ import SwiftUI
 
 enum WorkbenchCommand: CaseIterable, Hashable {
   case search
+  case goToLocation
   case download
   case upload
   case refresh
   case back
   case forward
   case quickLook
+  case copyObjectKey
+  case copyS3URI
   case toggleInspector
   case delete
 
   var title: String {
     switch self {
     case .search: "Search"
+    case .goToLocation: "Go to Location…"
     case .download: "Download…"
     case .upload: "Upload…"
     case .refresh: "Refresh"
     case .back: "Back"
     case .forward: "Forward"
     case .quickLook: "Quick Look"
+    case .copyObjectKey: "Copy Object Key"
+    case .copyS3URI: "Copy S3 URI"
     case .toggleInspector: "Toggle Inspector"
     case .delete: "Delete…"
     }
   }
 
-  var shortcut: (key: KeyEquivalent, modifiers: EventModifiers) {
+  var shortcut: KeyboardShortcut? {
     switch self {
-    case .search: ("f", .command)
-    case .download: ("s", .command)
-    case .upload: ("u", .command)
-    case .refresh: ("r", .command)
-    case .back: ("[", .command)
-    case .forward: ("]", .command)
-    case .quickLook: (.space, [])
-    case .toggleInspector: ("i", [.command, .option])
-    case .delete: (.delete, .command)
+    case .copyObjectKey, .copyS3URI: nil
+    case .goToLocation: KeyboardShortcut("g", modifiers: [.command, .shift])
+    case .search: KeyboardShortcut("f", modifiers: .command)
+    case .download: KeyboardShortcut("s", modifiers: .command)
+    case .upload: KeyboardShortcut("u", modifiers: .command)
+    case .refresh: KeyboardShortcut("r", modifiers: .command)
+    case .back: KeyboardShortcut("[", modifiers: .command)
+    case .forward: KeyboardShortcut("]", modifiers: .command)
+    case .quickLook: KeyboardShortcut(.space, modifiers: [])
+    case .toggleInspector: KeyboardShortcut("i", modifiers: [.command, .option])
+    case .delete: KeyboardShortcut(.delete, modifiers: .command)
     }
   }
 
@@ -56,11 +64,11 @@ struct WorkbenchCommandAvailability: Equatable {
     var enabled: Set<WorkbenchCommand> = [.toggleInspector]
     if model.selectedConnection != nil { enabled.insert(.refresh) }
     if model.location != nil {
-      enabled.formUnion([.search, .upload])
+      enabled.formUnion([.search, .upload, .goToLocation])
       let selection = model.selectedObjects
       if !selection.isEmpty, !selection.contains(where: \.isPrefix) {
         enabled.formUnion([.download, .delete])
-        if selection.count == 1 { enabled.insert(.quickLook) }
+        if selection.count == 1 { enabled.formUnion([.quickLook, .copyObjectKey, .copyS3URI]) }
       }
     }
     if model.canGoBack { enabled.insert(.back) }
@@ -117,6 +125,7 @@ struct WorkbenchCommands: Commands {
     }
     CommandMenu("Navigate") {
       commandButton(.search)
+      commandButton(.goToLocation)
       Divider()
       commandButton(.back)
       commandButton(.forward)
@@ -124,6 +133,8 @@ struct WorkbenchCommands: Commands {
     }
     CommandMenu("Object") {
       commandButton(.quickLook)
+      commandButton(.copyObjectKey)
+      commandButton(.copyS3URI)
       Divider()
       commandButton(.delete)
     }
@@ -138,7 +149,7 @@ struct WorkbenchCommands: Commands {
     } label: {
       Text(command.title)
     }
-    .keyboardShortcut(command.shortcut.key, modifiers: command.shortcut.modifiers)
+    .keyboardShortcut(command.shortcut)
     .disabled(context?.availability.isEnabled(command) != true)
   }
 

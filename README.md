@@ -6,7 +6,7 @@
 
 <p align="center">
   A native macOS browser for S3-compatible object storage.<br>
-  Finder-like navigation with the clarity of a professional database tool.
+  Browse buckets, search across prefixes, and transfer files from your Mac.
 </p>
 
 <p align="center">
@@ -17,59 +17,97 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/romainfrezier/S3Workbench" alt="MIT license"></a>
 </p>
 
-> [!IMPORTANT]
-> S3Workbench is S3-compatible first, not AWS-specific. Every connection keeps its own endpoint, region, addressing policy, TLS policy, and Keychain-protected credentials.
+Connect your S3 workspaces with independent endpoints, regions and access roots.
+Keep credentials in macOS Keychain and your everyday workflow in one native app.
 
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/object-browser.png" width="1120" alt="S3Workbench browsing a local S3 bucket with the metadata inspector open">
+  <img src="docs/screenshots/object-browser.jpg" width="1120" alt="S3Workbench browsing a local S3 bucket with the metadata inspector open">
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/recursive-search.png" width="1120" alt="S3Workbench showing recursive search results with paths and scanned-object counters">
+  <img src="docs/screenshots/recursive-search.jpg" width="1120" alt="S3Workbench showing recursive search results with paths and scanned-object counters">
 </p>
 
-<p align="center">
-  <img src="docs/screenshots/connection-settings.png" width="560" alt="S3Workbench connection settings for an S3-compatible endpoint">
-</p>
+Real S3Workbench 0.7.0 windows, shown with synthetic demo data.
 
 ## Why S3Workbench?
 
-Most desktop S3 tools either assume AWS endpoints or feel like generic file-transfer utilities. S3Workbench is built for people who move between local MinIO, private infrastructure, and hosted object storage every day.
+S3Workbench brings your MinIO, RustFS, private infrastructure, and hosted object storage into one native macOS app. Save your connections and use the same browsing, search, and transfer tools for each one.
 
 - Save and switch between multiple independent storage connections.
 - Color-code and duplicate saved connections.
 - Configure arbitrary servers without embedding a protocol, plus HTTPS, port, region, and addressing settings.
 - Open an optional `/bucket/prefix` access path directly when credentials cannot list every bucket.
 - Browse buckets and prefixes with native macOS tables, navigation, search, inspector, keyboard commands, and Quick Look.
+- Copy exact object keys or portable S3 URIs, and use **Navigate → Go to Location…** (`⇧⌘G`) to open either within the current bucket.
 - Upload, stream downloads, delete, move, drag and drop, inspect metadata, and create presigned URLs.
 - Choose Keep Both, Replace, or Cancel before a transfer or move can overwrite a destination.
+- Search recursively, then reuse a persistent local index for subsequent queries.
 - Track transfers with progress, cancellation, retry, and bounded-memory multipart uploads.
 - Keep credentials out of configuration files and logs.
 
+Go to Location preserves exact key bytes and respects the connection's access root. URI input uses `s3://bucket/encoded-key`; use **Copy S3 URI** for spaces, Unicode, reserved characters, or keys that themselves look like URIs. It never switches buckets or connections automatically. Successful navigation and **Reveal in Prefix** scroll the selected object into view.
+
 ## Compatibility
 
-| Provider | Configuration support | Automated conformance |
-| --- | --- | --- |
-| MinIO | Custom endpoint, path-style, HTTP/HTTPS | ✅ Tested locally |
-| AWS S3 | Regional endpoint, path/virtual addressing | ◻︎ Not yet tested with live credentials |
-| Cloudflare R2 | Custom endpoint and `auto` region | ◻︎ Not yet tested with live credentials |
-| Wasabi | Regional custom endpoint | ◻︎ Not yet tested with live credentials |
-| Backblaze B2 | Regional S3 endpoint | ◻︎ Not yet tested with live credentials |
-| Private S3 implementations | Arbitrary HTTP/HTTPS endpoint | Provider-dependent |
+Connect to hosted object storage, local development servers, or your own
+infrastructure using a configurable S3 endpoint.
 
-Compatibility claims are deliberately conservative: only MinIO is covered by the automated suite today.
+| Storage | Connection setup |
+| --- | --- |
+| MinIO & RustFS | Your server endpoint, path-style addressing, HTTP or HTTPS |
+| Amazon S3 | Regional endpoint and signing region |
+| Cloudflare R2 | Account endpoint and `auto` region |
+| Wasabi & Backblaze B2 | Regional S3 endpoint and signing region |
+| Private S3-compatible storage | Custom endpoint, port, addressing style, and optional custom CA |
+
+Each connection has its own credentials and settings. Open a specific
+`/bucket/prefix` directly when your access is limited to one part of a bucket.
+Browse, search, inspect and transfer objects without changing tools.
+
+Provider configuration and validation are different things: the reproducible
+MinIO and RustFS environments, covered operations and live-provider evidence
+are documented in [Testing](docs/TESTING.md).
 
 ## Install
 
 S3Workbench requires macOS 15 or later on Apple Silicon.
 
+### Homebrew
+
+Use the personal [Homebrew tap](https://github.com/romainfrezier/homebrew-s3workbench):
+
+```sh
+brew tap romainfrezier/s3workbench
+brew trust --cask romainfrezier/s3workbench/s3-workbench
+brew install --cask s3-workbench
+```
+
+To upgrade:
+
+```sh
+brew update
+brew upgrade --cask s3-workbench
+```
+
+The [cask](https://github.com/romainfrezier/homebrew-s3workbench/blob/main/Casks/s3-workbench.rb)
+uses the versioned release DMG and verifies its SHA-256. Upgrades preserve saved
+profiles, preferences, local indexes and Keychain credentials. Homebrew provides
+the update command; S3Workbench has no in-app updater.
+
+### Manual DMG
+
 1. Download the versioned `S3Workbench-X.Y.Z.dmg` and checksum from the [latest release](https://github.com/romainfrezier/S3Workbench/releases/latest), then verify them with `shasum -a 256 -c S3Workbench-X.Y.Z.dmg.sha256`.
 2. Open the disk image and drag S3Workbench to Applications.
 3. Launch the app and add your first connection.
 
-The current community build is ad-hoc signed because no Developer ID identity is available. macOS may require **Control-click → Open** on first launch. See [Packaging and distribution](docs/PACKAGING.md) for the exact Gatekeeper limitation and notarized-build workflow.
+Both installation methods use the same ad-hoc-signed, unnotarized community build.
+Homebrew does not grant Developer ID trust or bypass Gatekeeper. If macOS blocks
+first launch, review it through the standard **Privacy & Security** controls.
+See [Packaging and distribution](docs/PACKAGING.md) for distribution limits and
+the notarized-build workflow.
 
 ## Connection model
 
@@ -121,12 +159,13 @@ Requirements:
 - Apple Silicon Mac;
 - macOS 15 or later;
 - Xcode 26 or later;
-- Docker Desktop for the MinIO integration suite.
+- Docker Desktop for the MinIO and RustFS integration suites.
 
 ```sh
 swift test
 scripts/integration-test.sh
-VERSION=0.4.0
+S3_TEST_PROVIDER=rustfs scripts/integration-test.sh
+VERSION=0.7.0 # Example: use the version you are building.
 MARKETING_VERSION="$VERSION" scripts/package-dmg.sh
 MARKETING_VERSION="$VERSION" LAUNCH_TEST=1 scripts/verify-dmg.sh
 ```
@@ -155,7 +194,7 @@ administration or synchronization suite. The following are not planned for now:
 
 - local-to-S3 synchronization or mirroring;
 - bucket administration, policies, lifecycle, or replication;
-- regex, glob, saved queries, advanced filters, or a local search index;
+- regex, glob, saved queries, or advanced filters;
 - transfer resumption after the application exits;
 - full AWS profile, SSO, or credential-provider-chain support;
 - object-version browsing and restoration;

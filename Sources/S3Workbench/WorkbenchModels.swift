@@ -328,10 +328,11 @@ protocol WorkbenchServing: Sendable {
   func listObjects(at location: ObjectLocation, continuationToken: String?) async throws
     -> ObjectPage
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool, searchID: UUID
   ) async throws -> ObjectSearchPage
-  func cancelObjectSearch(at location: ObjectLocation) async
+  func cancelObjectSearch(id: UUID) async
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails
+  func hasUploadConflicts(files: [URL], to location: ObjectLocation) async throws -> Bool
   func upload(files: [URL], to location: ObjectLocation, collisionPolicy: CollisionPolicy) async throws
   func download(
     objects: [ObjectRow], from location: ObjectLocation, to directory: URL,
@@ -355,6 +356,10 @@ protocol WorkbenchServing: Sendable {
 }
 
 extension WorkbenchServing {
+  func hasUploadConflicts(files: [URL], to location: ObjectLocation) async throws -> Bool {
+    throw WorkbenchUIError.serviceUnavailable
+  }
+
   func unsignedURL(for object: ObjectRow, at location: ObjectLocation) async throws -> URL {
     throw WorkbenchUIError.serviceUnavailable
   }
@@ -396,9 +401,9 @@ actor PlaceholderWorkbenchService: WorkbenchServing {
     -> ObjectPage
   { throw WorkbenchUIError.serviceUnavailable }
   func searchObjects(
-    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool
+    at location: ObjectLocation, query: String, continuationToken: String?, refreshIndex: Bool, searchID: UUID
   ) async throws -> ObjectSearchPage { throw WorkbenchUIError.serviceUnavailable }
-  func cancelObjectSearch(at location: ObjectLocation) async {}
+  func cancelObjectSearch(id: UUID) async {}
   func objectDetails(at location: ObjectLocation, object: ObjectRow) async throws -> ObjectDetails {
     throw WorkbenchUIError.serviceUnavailable
   }

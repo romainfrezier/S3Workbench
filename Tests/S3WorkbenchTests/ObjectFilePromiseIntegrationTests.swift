@@ -55,7 +55,9 @@ import Testing
   }
 
   do {
+    #expect(try await !service.hasUploadConflicts(files: [smallSource, largeSource], to: location))
     try await service.upload(files: [smallSource, largeSource], to: location, collisionPolicy: .cancel)
+    #expect(try await service.hasUploadConflicts(files: [smallSource, largeSource], to: location))
     let smallDestination = directory.appendingPathComponent("macOS-small-destination.data")
     let largeDestination = directory.appendingPathComponent("macOS-large-destination.data")
 
