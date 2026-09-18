@@ -2,11 +2,13 @@ name: CodeQL Web and Actions
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, 'release/**', 'hotfix/**']
     paths:
       - 'website/**'
       - '.github/**'
   pull_request:
+    branches: [main, develop, 'release/**', 'hotfix/**']
+    types: [opened, synchronize, reopened, edited]
     paths:
       - 'website/**'
       - '.github/**'

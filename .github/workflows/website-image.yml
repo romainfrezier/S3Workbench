@@ -2,13 +2,15 @@ name: Website image
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, 'release/**', 'hotfix/**']
     tags: ['v*.*.*-site']
     paths:
       - 'website/**'
       - '.github/workflows/**'
       - '.github/test-workflow-triggers.rb'
   pull_request:
+    branches: [main, develop, 'release/**', 'hotfix/**']
+    types: [opened, synchronize, reopened, edited]
     paths:
       - 'website/**'
       - '.github/workflows/**'
@@ -36,7 +38,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -59,18 +61,28 @@ jobs:
 
       - name: Build container
         if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./website
           file: ./website/Dockerfile
           push: false
+          load: true
+          tags: s3workbench-site:test
           build-args: |
             VITE_SITE_URL=https://s3workbench.com
             VITE_BASE_PATH=/
 
+      - name: Check HTTP routing
+        if: github.event_name == 'pull_request'
+        run: |
+          docker run --detach --rm --name website-http-test -p 127.0.0.1:8080:80 s3workbench-site:test
+          trap 'docker stop website-http-test' EXIT
+          curl --retry 10 --retry-all-errors --retry-delay 1 --fail http://127.0.0.1:8080/healthz
+          node scripts/check-http.mjs http://127.0.0.1:8080
+
   publish:
     name: Publish website image
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     needs: website
     runs-on: ubuntu-latest
     permissions:
@@ -81,7 +93,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -89,7 +101,7 @@ jobs:
 
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -99,7 +111,7 @@ jobs:
             type=match,pattern=v(.*)-site,group=1
 
       - name: Build and push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./website
           file: ./website/Dockerfile

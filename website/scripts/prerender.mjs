@@ -1,10 +1,22 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const dist = join(root, 'dist')
-const baseHtml = await readFile(join(dist, 'index.html'), 'utf8')
+await cp(join(root, 'dist-server', 'assets'), join(dist, 'assets'), { recursive: true })
+let baseHtml = await readFile(join(dist, 'index.html'), 'utf8')
+// The tiny stylesheet fits in the HTML; authorize its exact bytes in the CSP.
+const styleHashes = []
+for (const [tag, href] of baseHtml.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>/g)) {
+  const css = await readFile(join(dist, href.slice((process.env.VITE_BASE_PATH || '/').length)), 'utf8')
+  baseHtml = baseHtml.replace(tag, `<style>${css}</style>`)
+  styleHashes.push(`'sha256-${createHash('sha256').update(css).digest('base64')}'`)
+}
+if (!styleHashes.length) throw new Error('Missing built stylesheet')
+const nginx = (await readFile(join(root, 'nginx.conf'), 'utf8')).replace('__STYLE_HASHES__', styleHashes.join(' '))
+await writeFile(join(root, 'dist-server', 'nginx.conf'), nginx)
 const { render } = await import(pathToFileURL(join(root, 'dist-server', 'ssr.js')).href)
 const siteUrl = (process.env.VITE_SITE_URL || 'https://s3workbench.com').replace(/\/$/, '')
 const routes = ['/', '/download/', '/compatibility/', '/security/']

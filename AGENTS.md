@@ -7,6 +7,21 @@ GitHub Discussions are discovery, not permission to implement. Keep each change
 limited to the user's request and its issue; do not expand into neighboring
 items.
 
+## Gitflow
+
+Follow the branch table in [CONTRIBUTING.md](CONTRIBUTING.md#gitflow).
+Start normal work from `origin/develop` and target `develop`; use `feature/*`,
+`bugfix/*` or `chore/*` branches. Only `release/*` and `hotfix/*` PRs from this
+repository target `main`. Use merge commits, retain release/hotfix branches
+until back-merges are complete, and never reset or force-push shared branches.
+Check all applicable CI and CodeQL results on the exact PR head before merging;
+the Gitflow branch-policy check validates routing only.
+Romain must personally validate the final diff and checks before merging.
+Never submit an approving review under his account on his behalf. Wait for his
+explicit approval of the final PR; passing CI alone is not merge authorization.
+Do not enable auto-merge. Releases, release tags and production deployments
+require his explicit instruction for that operation, separately from PR work.
+
 ## Product guardrails
 
 - S3Workbench is a deliberately simple, native macOS object browser for
