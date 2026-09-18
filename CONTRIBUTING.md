@@ -37,9 +37,9 @@ Use standard Git commands and pull requests; the git-flow extension is optional.
 | `release/<version>` | `develop` | `main`, then `develop` |
 | `hotfix/<version>` | `main` | `main`, then `develop` and any open release |
 
-Dependabot and Codex branches (`dependabot/*` and `codex/*`) also target
-`develop`. They follow the same validation and release process as feature
-branches. Do not merge `develop` or a feature branch directly into `main`.
+Dependabot branches (`dependabot/*`) also target `develop`. Agent-created
+branches use the same `feature/*`, `bugfix/*` or `chore/*` names and validation
+as other contributions. Do not merge `develop` or a feature branch directly into `main`.
 Release and hotfix PRs into `main` must come from this repository.
 
 1. Fetch and branch from the current remote base, for example

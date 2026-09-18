@@ -3,7 +3,7 @@ def allowed_gitflow?(base, head, same_repository)
   when 'main'
     same_repository && head.match?(%r{\A(release|hotfix)/.+\z})
   when 'develop'
-    head.match?(%r{\A(feature|bugfix|chore|codex|dependabot)/.+\z}) ||
+    head.match?(%r{\A(feature|bugfix|chore|dependabot)/.+\z}) ||
       (same_repository && (head == 'main' || head.match?(%r{\A(release|hotfix)/.+\z})))
   when %r{\Arelease/.+\z}
     head.match?(%r{\A(bugfix|hotfix)/.+\z}) || (same_repository && head == 'main')
@@ -20,7 +20,7 @@ if ARGV == ['--test']
     ['develop', 'feature/search', false, true],
     ['develop', 'bugfix/search', true, true],
     ['develop', 'chore/ci', true, true],
-    ['develop', 'codex/fix-19-search-query', true, true],
+    ['develop', 'agent/search', true, false],
     ['develop', 'dependabot/github_actions/checkout-7', true, true],
     ['develop', 'main', true, true],
     ['develop', 'main', false, false],

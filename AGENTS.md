@@ -10,8 +10,8 @@ items.
 ## Gitflow
 
 Follow the branch table in [CONTRIBUTING.md](CONTRIBUTING.md#gitflow).
-Start normal work from `origin/develop` and target `develop`; `codex/*` branches
-are accepted integration branches. Only `release/*` and `hotfix/*` PRs from this
+Start normal work from `origin/develop` and target `develop`; use `feature/*`,
+`bugfix/*` or `chore/*` branches. Only `release/*` and `hotfix/*` PRs from this
 repository target `main`. Use merge commits, retain release/hotfix branches
 until back-merges are complete, and never reset or force-push shared branches.
 Check all applicable CI and CodeQL results on the exact PR head before merging;
