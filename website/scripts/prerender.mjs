@@ -1,13 +1,12 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const dist = join(root, 'dist')
-// These pages use native links only; keep React in development, ship static HTML.
-let baseHtml = (await readFile(join(dist, 'index.html'), 'utf8'))
-  .replace(/<script\b[^>]*type="module"[^>]*>[\s\S]*?<\/script>/g, '')
+await cp(join(root, 'dist-server', 'assets'), join(dist, 'assets'), { recursive: true })
+let baseHtml = await readFile(join(dist, 'index.html'), 'utf8')
 // The tiny stylesheet fits in the HTML; authorize its exact bytes in the CSP.
 const styleHashes = []
 for (const [tag, href] of baseHtml.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>/g)) {

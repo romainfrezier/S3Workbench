@@ -1,4 +1,3 @@
-import './App.css'
 import logoUrl from './media/app-icon-64.webp'
 import browser640 from './media/object-browser-640.webp'
 import browser768 from './media/object-browser-768.webp'
