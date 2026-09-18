@@ -419,7 +419,11 @@ final class WorkbenchViewModel {
     guard let activeSearchQuery,
       !activeSearchQuery.utf8.elementsEqual(searchQuery.utf8)
     else { return }
-    await reloadObjects(clearSearchQuery: false)
+    if searchQuery.isEmpty {
+      await reloadObjects(clearSearchQuery: false)
+    } else {
+      cancelSearch()
+    }
   }
 
   func cancelSearch() {
@@ -1025,6 +1029,12 @@ final class WorkbenchViewModel {
 
   private func discardStaleSearch(_ context: ObjectSearchContext) {
     guard activeSearchContext == context else { return }
+    if location == context.location, !searchQuery.isEmpty {
+      // Editing the draft cancels work, but keeps the last submitted results visible.
+      cancelSearch()
+      searchTask = nil
+      return
+    }
     stopLoadingIndicator(.search, id: context.id)
     searchTask = nil
     activeSearchContext = nil

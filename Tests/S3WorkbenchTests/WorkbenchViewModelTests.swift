@@ -1645,14 +1645,27 @@ private actor ResponseGate {
   #expect(matches.map(\.key) == ["recursive-search/nested/object-1004-needle.txt"])
   #expect(snapshot?.objectCount == 1_005)
 
-  let indexedPage = try await service.searchObjects(
-    at: location,
-    query: "object-0001",
-    continuationToken: nil,
-    refreshIndex: false
-  )
-  #expect(indexedPage.objects.map(\.key) == ["recursive-search/nested/object-0001.txt"])
-  #expect(indexedPage.scannedObjectCount == 0)
+  let indexedModel = await MainActor.run {
+    let model = WorkbenchViewModel(service: service)
+    model.selectedConnectionID = connectionID
+    model.selectedBucket = bucket
+    model.prefix = "recursive-search/"
+    model.searchQuery = "needle"
+    return model
+  }
+  await indexedModel.startSearch()
+  await MainActor.run { indexedModel.searchQuery = "object-0001" }
+  await indexedModel.searchQueryDidChange()
+  await MainActor.run {
+    #expect(indexedModel.objects.map(\.key) == ["recursive-search/nested/object-1004-needle.txt"])
+    #expect(indexedModel.searchIndexSnapshot?.objectCount == 1_005)
+  }
+  #expect(await counter.count == 2)
+  await indexedModel.startSearch()
+  await MainActor.run {
+    #expect(indexedModel.objects.map(\.key) == ["recursive-search/nested/object-0001.txt"])
+    #expect(indexedModel.searchScannedObjectCount == 0)
+  }
   #expect(await counter.count == 2)
 
   let navigationService = CoreWorkbenchService(connectionStore: store, credentialStore: credentials)
@@ -1848,6 +1861,79 @@ private actor ResponseGate {
   #expect(model.activeSearchQuery == "new")
   #expect(model.objects.map(\.id) == ["current"])
   #expect(model.searchScannedObjectCount == 1)
+}
+
+@MainActor
+@Test func editingCompletedSearchKeepsResultsUntilSubmissionWithoutListingObjects() async {
+  let first = searchObject(id: "first", key: "nested/first.txt")
+  let second = searchObject(id: "second", key: "nested/second.txt")
+  let service = StubWorkbenchService(
+    connections: [], listObjectsResult: .success(.empty)
+  ) { _, query, _ in
+    ObjectSearchPage(
+      objects: query == "first" ? [first] : [second],
+      scannedObjectCount: 2, continuationToken: nil)
+  }
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.searchQuery = "first"
+  await model.startSearch()
+  model.selectedObjectIDs = [first.id]
+
+  model.searchQuery = "second"
+  await model.searchQueryDidChange()
+
+  #expect(model.isSearchMode)
+  #expect(model.activeSearchQuery == "first")
+  #expect(model.objects == [first])
+  #expect(model.selectedObjectIDs == [first.id])
+  #expect(model.searchScannedObjectCount == 2)
+  #expect(await service.searchCalls.count == 1)
+  #expect(await service.lastObjectLocation == nil)
+
+  await model.startSearch()
+
+  #expect(model.activeSearchQuery == "second")
+  #expect(model.objects == [second])
+  #expect(await service.searchCalls.map(\.query) == ["first", "second"])
+  #expect(await service.lastObjectLocation == nil)
+}
+
+@MainActor
+@Test(arguments: [true, false])
+func editingRunningSearchKeepsPublishedResultsAndRejectsLatePages(notifyChange: Bool) async {
+  let gate = ResponseGate()
+  let first = searchObject(id: "first", key: "first.txt")
+  let late = searchObject(id: "late", key: "late.txt")
+  let service = StubWorkbenchService(
+    connections: [], listObjectsResult: .success(.empty)
+  ) { _, _, token in
+    if token == nil {
+      return ObjectSearchPage(
+        objects: [first], scannedObjectCount: 1_000, continuationToken: "next")
+    }
+    await gate.wait()
+    return ObjectSearchPage(objects: [late], scannedObjectCount: 1, continuationToken: nil)
+  }
+  let model = WorkbenchViewModel(service: service)
+  model.selectedConnectionID = UUID()
+  model.selectedBucket = "bucket"
+  model.searchQuery = "txt"
+  let search = Task { await model.startSearch() }
+  #expect(await waitForSearchCall(service, count: 2))
+
+  model.searchQuery = "other"
+  if notifyChange { await model.searchQueryDidChange() }
+  await gate.release()
+  await search.value
+
+  #expect(model.isSearchMode)
+  #expect(model.objects == [first])
+  #expect(model.searchScannedObjectCount == 1_000)
+  #expect(!model.isSearching)
+  #expect(model.searchWasCancelled)
+  #expect(await service.lastObjectLocation == nil)
 }
 
 @MainActor
