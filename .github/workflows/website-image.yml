@@ -2,13 +2,15 @@ name: Website image
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, 'release/**', 'hotfix/**']
     tags: ['v*.*.*-site']
     paths:
       - 'website/**'
       - '.github/workflows/**'
       - '.github/test-workflow-triggers.rb'
   pull_request:
+    branches: [main, develop, 'release/**', 'hotfix/**']
+    types: [opened, synchronize, reopened, edited]
     paths:
       - 'website/**'
       - '.github/workflows/**'
@@ -80,7 +82,7 @@ jobs:
 
   publish:
     name: Publish website image
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     needs: website
     runs-on: ubuntu-latest
     permissions:
