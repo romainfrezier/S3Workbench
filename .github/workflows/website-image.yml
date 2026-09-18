@@ -3,14 +3,23 @@ name: Website image
 on:
   push:
     branches: [main]
-    tags: ['v*.*.*', 'v*.*.*-site']
+    tags: ['v*.*.*-site']
+    paths:
+      - 'website/**'
+      - '.github/workflows/**'
+      - '.github/test-workflow-triggers.rb'
   pull_request:
     paths:
       - 'website/**'
-      - '.github/workflows/website-image.yml'
+      - '.github/workflows/**'
+      - '.github/test-workflow-triggers.rb'
 
 permissions:
   contents: read
+
+concurrency:
+  group: website-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE_NAME: ghcr.io/romainfrezier/s3workbench-site
@@ -35,6 +44,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Check workflow scopes
+        run: ruby ../.github/test-workflow-triggers.rb
 
       - name: Typecheck
         run: npm run typecheck

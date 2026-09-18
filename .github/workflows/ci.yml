@@ -3,8 +3,28 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['v*', '!v*-site']
+    paths:
+      - '**/*.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Integration/**'
+      - 'Packaging/**'
+      - 'Assets/**'
+      - 'scripts/**'
+      - '.github/workflows/ci.yml'
   pull_request:
+    paths:
+      - '**/*.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Integration/**'
+      - 'Packaging/**'
+      - 'Assets/**'
+      - 'scripts/**'
+      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 permissions:
