@@ -30,7 +30,7 @@ p { color: var(--muted); line-height: 1.65; }
 .text-link { display: inline-flex; align-items: center; gap: 8px; color: var(--cyan); border-bottom: 1px solid #32656c; padding-bottom: 4px; font-size: 13px; font-weight: 750; text-decoration: none; }
 .text-link:hover { border-color: var(--cyan); }
 .platform-note { margin-top: 25px; color: #789397; font: 11px/1.4 var(--mono); }
-.hero-visual { min-width: 0; margin-inline: 0; margin-bottom: 0; }
+.hero-visual { min-width: 0; margin-bottom: 0; }
 .hero-visual figcaption { margin: 15px 7px 0; color: var(--muted); font-size: 12px; }
 .section { padding-top: 44px; padding-bottom: 60px; }
 .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px; }
@@ -39,6 +39,8 @@ p { color: var(--muted); line-height: 1.65; }
 .search-layout { display: grid; gap: 42px; }
 .search-copy { max-width: 650px; }
 .search-image { min-width: 0; }
+/* Keep the 1229px captures within their native resolution on 2x displays. */
+.hero-visual, .search-image { width: 100%; max-width: 614px; margin-inline: auto; }
 .search-image img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 12px; }
 .search-section { padding: 60px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #081c23; }.search-copy { order: -1; }.compat-strip { display: flex; align-items: end; justify-content: space-between; gap: 30px; padding-top: 60px; padding-bottom: 60px; }.compat-strip h2 { max-width: 650px; font-size: clamp(32px, 4vw, 44px); margin: 0 0 16px; }.compat-strip p { max-width: 540px; margin: 0; }.compat-strip .text-link { margin-bottom: 4px; white-space: nowrap; }
 .download-band { padding: 44px 0; border-top: 1px solid var(--line); background: var(--panel); }
