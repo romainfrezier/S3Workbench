@@ -1,9 +1,11 @@
 import { access, readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 const dist = fileURLToPath(new URL('../dist/', import.meta.url))
 const routes = ['/', '/download/', '/compatibility/', '/security/']
+const nginx = await readFile(fileURLToPath(new URL('../dist-server/nginx.conf', import.meta.url)), 'utf8')
 const fileFor = (route) => join(dist, route === '/' ? 'index.html' : `${route.slice(1)}index.html`)
 for (const route of routes) {
   const file = fileFor(route)
@@ -13,6 +15,18 @@ for (const route of routes) {
   if (!html.includes('<link rel="canonical"')) throw new Error(`${route}: missing canonical`)
   if (!html.includes('<meta name="description"')) throw new Error(`${route}: missing description`)
   if (!html.includes('<script type="application/ld+json">')) throw new Error(`${route}: missing structured data`)
+  if (/<script\b[^>]*\bsrc=/.test(html)) throw new Error(`${route}: unnecessary client JavaScript`)
+  if (!html.includes('<h1')) throw new Error(`${route}: missing prerendered content`)
+  if (/<link[^>]*rel="stylesheet"/.test(html)) throw new Error(`${route}: render-blocking stylesheet`)
+  const css = html.match(/<style>([\s\S]*?)<\/style>/)?.[1]
+  if (!css || !nginx.includes(`'sha256-${createHash('sha256').update(css).digest('base64')}'`)) throw new Error(`${route}: stylesheet blocked by CSP`)
+  const logo = html.match(/<img[^>]*src="([^"]*app-icon-64[^"]*\.webp)"/)
+  if (!logo) throw new Error(`${route}: missing lightweight logo`)
+  if ((await readFile(join(dist, logo[1]))).length > 10_000) throw new Error(`${route}: oversized logo`)
+  if (route === '/') {
+    const screenshots = html.match(/<img[^>]*srcSet="[^"]*\.webp[^>]*sizes="[^"]+"/g)
+    if (screenshots?.length !== 2) throw new Error('home: missing responsive screenshots')
+  }
 }
 const sitemap = await readFile(join(dist, 'sitemap.xml'), 'utf8')
 for (const route of routes) if (!sitemap.includes(`<loc>https://s3workbench.com${route}</loc>`)) throw new Error(`sitemap: missing ${route}`)

@@ -13,8 +13,14 @@ export MINIO_RESTRICTED_USER=${MINIO_RESTRICTED_USER:-s3workbench-restricted}
 export MINIO_RESTRICTED_PASSWORD=${MINIO_RESTRICTED_PASSWORD:-s3workbench-restricted-secret}
 
 compose=(docker compose -f "$COMPOSE_FILE")
+provider=${S3_TEST_PROVIDER:-minio}
+case "$provider" in
+  minio) ;;
+  rustfs) compose+=(-f "$ROOT/Integration/docker-compose.rustfs.yml") ;;
+  *) echo "Unknown S3_TEST_PROVIDER: $provider (expected minio or rustfs)" >&2; exit 2 ;;
+esac
 cleanup() {
-  if [[ ${KEEP_MINIO:-0} != 1 ]]; then "${compose[@]}" down --volumes --remove-orphans >/dev/null; fi
+  if [[ ${KEEP_S3:-${KEEP_MINIO:-0}} != 1 ]]; then "${compose[@]}" down --volumes --remove-orphans >/dev/null; fi
 }
 trap cleanup EXIT
 
@@ -49,7 +55,7 @@ export AWS_EC2_METADATA_DISABLED=true
     : >"$fixture/nested/$name"
     i=$((i + 1))
   done
-  mc mirror "$fixture" "local/$MINIO_TEST_BUCKET/recursive-search" >/dev/null
+  mc mirror --overwrite "$fixture" "local/$MINIO_TEST_BUCKET/recursive-search" >/dev/null
   key="prefix with spaces/ünicode-雪.txt"
   printf "S3Workbench integration payload" | mc pipe "local/$MINIO_TEST_BUCKET/$key" >/dev/null
   test "$(mc cat "local/$MINIO_TEST_BUCKET/$key")" = "S3Workbench integration payload"
@@ -59,7 +65,7 @@ export AWS_EC2_METADATA_DISABLED=true
   case "$multipart_stat" in *"10 MiB"*) ;; *) exit 1 ;; esac
   mc rm "local/$MINIO_TEST_BUCKET/$key" "local/$MINIO_TEST_BUCKET/multipart-10MiB.bin" >/dev/null
 '
-echo "MinIO fixture smoke checks passed"
+echo "$provider fixture smoke checks passed"
 
 swift test --package-path "$ROOT"
 
@@ -76,4 +82,4 @@ S3_RESTART_PROBE_PHASE=read S3_RESTART_PROBE_FILE="$RESTART_PROBE_FILE" \
   swift test --package-path "$ROOT" --skip-build --filter restartPersistenceProbe
 echo "Connection metadata and Keychain credentials survived a fresh test process"
 
-echo "Swift and MinIO integration checks passed at $S3_TEST_ENDPOINT"
+echo "Swift and $provider integration checks passed at $S3_TEST_ENDPOINT"

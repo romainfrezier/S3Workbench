@@ -12,18 +12,20 @@ struct WorkbenchRootView: View {
 
   @State private var isInspectorPresented = true
   @State private var isTransferPopoverPresented = false
+  @State private var isGoToLocationPresented = false
   @State private var isUploadPresented = false
   @State private var isDownloadDestinationPresented = false
   @State private var isDeleteConfirmationPresented = false
   @State private var connectionToDelete: ConnectionRow?
   @State private var renameKey: String?
   @State private var pendingUploadURLs: [URL] = []
+  @State private var pendingUploadLocation: ObjectLocation?
   @State private var pendingDownloadDirectory: URL?
   @State private var isUploadCollisionPresented = false
   @State private var isDownloadCollisionPresented = false
   @FocusState private var isSearchFocused: Bool
 
-  var body: some View {
+  private var navigation: some View {
     NavigationSplitView {
       connectionSidebar
         .navigationSplitViewColumnWidth(min: 190, ideal: 230, max: 320)
@@ -35,6 +37,10 @@ struct WorkbenchRootView: View {
         }
     }
     .navigationSplitViewStyle(.balanced)
+  }
+
+  private var navigationContent: some View {
+    navigation
     .toolbar { toolbarContent }
     .searchable(text: $model.searchQuery, placement: .toolbar, prompt: "Search below this prefix")
     .searchFocused($isSearchFocused)
@@ -42,6 +48,32 @@ struct WorkbenchRootView: View {
     .onChange(of: model.searchQuery) { _, _ in
       Task { await model.searchQueryDidChange() }
     }
+    .sheet(isPresented: $isGoToLocationPresented) {
+      GoToLocationView { key in
+        isGoToLocationPresented = false
+        Task { await model.goToLocation(key) }
+      }
+    }
+    .safeAreaInset(edge: .top) {
+      if model.isResolvingObjectKey {
+        HStack {
+          ProgressView().controlSize(.small)
+          Text("Finding object…")
+          Spacer()
+          Button("Cancel") { model.cancelKeyNavigation() }
+        }
+        .padding(10)
+        .background(.bar)
+      } else if let error = model.navigationErrorMessage {
+        DismissibleErrorBanner(message: error) { model.navigationErrorMessage = nil }
+      }
+    }
+    .onChange(of: model.location) { _, _ in model.cancelKeyNavigation() }
+    .onDisappear { model.cancelKeyNavigation() }
+  }
+
+  var body: some View {
+    navigationContent
     .sheet(
       isPresented: Binding(
         get: { renameKey != nil },
@@ -65,13 +97,16 @@ struct WorkbenchRootView: View {
       }
     }
     .confirmationDialog(
-      "If an object already exists",
+      "An object already exists",
       isPresented: $isUploadCollisionPresented,
       titleVisibility: .visible
     ) {
       Button("Keep Both") { performUpload(.keepBoth) }
       Button("Replace", role: .destructive) { performUpload(.replace) }
-      Button("Cancel", role: .cancel) { pendingUploadURLs = [] }
+      Button("Cancel", role: .cancel) {
+        pendingUploadURLs = []
+        pendingUploadLocation = nil
+      }
     } message: {
       Text("Choose how uploads with the same key should be handled.")
     }
@@ -125,8 +160,8 @@ struct WorkbenchRootView: View {
     .quickLookPreview($model.previewURL)
     .focusedSceneValue(\.workbenchCommandContext, commandContext)
     .task { await model.start() }
-    .task(id: model.selectedConnectionID) {
-      guard model.selectedConnectionID != nil else { return }
+    .onChange(of: model.connections) { _, _ in model.reconcileConnections() }
+    .task(id: model.selectedConnection) {
       await model.reloadConnection()
     }
     .task(id: model.selectedObjectIDs) { await model.loadSelectionDetails() }
@@ -281,6 +316,10 @@ struct WorkbenchRootView: View {
         }
         Button("Download…") { perform(.download) }
           .disabled(!commandAvailability.isEnabled(.download))
+        Button("Copy Object Key") { perform(.copyObjectKey) }
+          .disabled(!commandAvailability.isEnabled(.copyObjectKey))
+        Button("Copy S3 URI") { perform(.copyS3URI) }
+          .disabled(!commandAvailability.isEnabled(.copyS3URI))
         Button("Copy Unsigned URL") { copyUnsignedURL() }
           .disabled(model.selectedObject == nil || model.selectedObject?.isPrefix == true)
         Button("Copy Signed URL") { copySignedURL() }
@@ -297,7 +336,7 @@ struct WorkbenchRootView: View {
   }
 
   private var isModalPresented: Bool {
-    renameKey != nil || connectionToDelete != nil
+    isGoToLocationPresented || renameKey != nil || connectionToDelete != nil
       || isUploadPresented || isDownloadDestinationPresented
       || isUploadCollisionPresented || isDownloadCollisionPresented
       || isDeleteConfirmationPresented || model.errorMessage != nil || model.previewURL != nil
@@ -316,6 +355,10 @@ struct WorkbenchRootView: View {
     switch command {
     case .search:
       isSearchFocused = true
+    case .goToLocation:
+      model.cancelKeyNavigation()
+      model.navigationErrorMessage = nil
+      isGoToLocationPresented = true
     case .download:
       beginDownload()
     case .upload:
@@ -326,6 +369,10 @@ struct WorkbenchRootView: View {
       Task { await model.goBack() }
     case .forward:
       Task { await model.goForward() }
+    case .copyObjectKey:
+      model.copyObjectKey()
+    case .copyS3URI:
+      model.copyS3URI()
     case .quickLook:
       Task { await model.previewSelected() }
     case .toggleInspector:
@@ -366,12 +413,24 @@ struct WorkbenchRootView: View {
   }
 
   private func requestUpload(_ urls: [URL]) {
-    guard !urls.isEmpty else { return }
-    pendingUploadURLs = urls
+    guard !urls.isEmpty, let location = model.location, pendingUploadURLs.isEmpty else { return }
     if preferences.uploadCollision == .keepBoth {
-      performUpload(.keepBoth)
+      Task { await model.upload(urls, to: location, collisionPolicy: .keepBoth) }
     } else {
-      isUploadCollisionPresented = true
+      pendingUploadURLs = urls
+      pendingUploadLocation = location
+      Task {
+        guard let hasConflicts = await model.hasUploadConflicts(urls, at: location) else {
+          pendingUploadURLs = []
+          pendingUploadLocation = nil
+          return
+        }
+        if hasConflicts {
+          isUploadCollisionPresented = true
+        } else {
+          performUpload(.cancel)
+        }
+      }
     }
   }
 
@@ -407,9 +466,11 @@ struct WorkbenchRootView: View {
   }
 
   private func performUpload(_ collisionPolicy: CollisionPolicy) {
+    guard let location = pendingUploadLocation else { return }
     let urls = pendingUploadURLs
     pendingUploadURLs = []
-    Task { await model.upload(urls, collisionPolicy: collisionPolicy) }
+    pendingUploadLocation = nil
+    Task { await model.upload(urls, to: location, collisionPolicy: collisionPolicy) }
   }
 
   private func performDownload(_ collisionPolicy: CollisionPolicy) {
@@ -517,6 +578,16 @@ private struct ObjectBrowserView: View {
   }
 
   var body: some View {
+    ScrollViewReader { proxy in
+      table
+        .onChange(of: model.objectRevealRequestID) { _, _ in
+          guard let object = model.selectedObject else { return }
+          proxy.scrollTo(object.id, anchor: .center)
+        }
+    }
+  }
+
+  private var table: some View {
     Table(displayedObjects, selection: $model.selectedObjectIDs, sortOrder: $sortOrder) {
       TableColumn("Name", sortUsing: ObjectSortComparator(column: .name)) { object in
         if object.isPrefix {
@@ -588,6 +659,8 @@ private struct ObjectBrowserView: View {
           }
         }
         if !object.isPrefix {
+          Button("Copy Object Key") { model.copyObjectKey(object) }
+          Button("Copy S3 URI") { model.copyS3URI(object) }
           Button("Copy Unsigned URL") {
             Task {
               model.select(object)

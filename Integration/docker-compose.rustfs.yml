@@ -1,0 +1,14 @@
+# Keep the shared fixture's service names so both servers run the same tests.
+services:
+  minio:
+    image: rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: ${MINIO_ROOT_USER:-s3workbench}
+      RUSTFS_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-s3workbench-secret}
+      RUSTFS_CONSOLE_ENABLE: "true"
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:9000/health"]
+      start_period: 30s
