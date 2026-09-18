@@ -40,4 +40,26 @@ end
 %w[codeql-swift codeql-web].each do |name|
   abort "#{name}: missing full scheduled/manual scan" unless workflows[name].key?('schedule') && workflows[name].key?('workflow_dispatch')
 end
-puts 'Workflow scope checks passed (web, native, docs, releases and security scans).'
+
+workflows.each do |name, triggers|
+  %w[push pull_request].each do |event|
+    %w[main develop release/0.8.0 release/0.2.0-site hotfix/0.7.1].each do |branch|
+      abort "#{name}: missing #{event} coverage for #{branch}" unless matches?(triggers.fetch(event)['branches'], branch)
+    end
+    abort "#{name}: unexpected feature branch target" if matches?(triggers.fetch(event)['branches'], 'feature/search')
+  end
+  abort "#{name}: PR retargeting must rerun validation" unless triggers.fetch('pull_request')['types'].include?('edited')
+end
+
+gitflow = YAML.load_file(File.join(__dir__, 'workflows/gitflow.yml'))
+gitflow_events = gitflow['on'] || gitflow[true]
+abort 'Gitflow policy must run on every PR, including retargets and docs-only changes' unless
+  gitflow_events.fetch('pull_request').keys == ['types'] &&
+  %w[opened synchronize reopened edited].all? { |event| gitflow_events['pull_request']['types'].include?(event) }
+
+website = YAML.load_file(File.join(__dir__, 'workflows/website-image.yml'))
+abort 'Website publishing must stay on main and release tags' unless
+  website.fetch('jobs').fetch('publish')['if'] ==
+    "github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))"
+
+puts 'Workflow scope checks passed (Gitflow branches, web, native, docs, releases and security scans).'

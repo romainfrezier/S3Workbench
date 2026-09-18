@@ -72,7 +72,12 @@ Set `LAUNCH_TEST=1` on `verify-dmg.sh` to add a local launch/quit smoke test. A 
 
 ## Publish a GitHub release
 
-Create and push the annotated tag only from the intended, green `main` commit. After the tag workflow succeeds, download its two assets and verify them before publication:
+Follow [Gitflow](../CONTRIBUTING.md#gitflow): merge a validated `release/<version>`
+or `hotfix/<version>` PR into `main` with a merge commit. Create and push the
+annotated tag only from that intended, green `main` merge commit. Keep the source
+branch until its back-merge into `develop` (and any open release for a hotfix) is
+complete. After the tag workflow succeeds, download its two assets and verify
+them before publication:
 
 ```sh
 VERSION=0.7.0 # Example: use the version being built or published.
