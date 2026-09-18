@@ -1,4 +1,11 @@
 import './App.css'
+import logoUrl from './media/app-icon-64.webp'
+import browser640 from './media/object-browser-640.webp'
+import browser768 from './media/object-browser-768.webp'
+import browser1229 from './media/object-browser-1229.webp'
+import search640 from './media/recursive-search-640.webp'
+import search768 from './media/recursive-search-768.webp'
+import search1229 from './media/recursive-search-1229.webp'
 
 const releaseUrl = 'https://github.com/romainfrezier/S3Workbench/releases/latest'
 const githubUrl = 'https://github.com/romainfrezier/S3Workbench'
@@ -17,7 +24,7 @@ function pageFromPath(pathname: string): Page {
 }
 
 function Logo() {
-  return <span className="brand-mark"><img src={asset('s3workbench-icon.png')} alt="" /></span>
+  return <span className="brand-mark"><img src={logoUrl} alt="" width="32" height="32" /></span>
 }
 
 function Header({ page }: { page: Page }) {
@@ -53,7 +60,7 @@ function HomePage() {
     <main>
       <section className="hero shell">
         <div className="hero-copy"><h1>Browse S3<br />from your Mac.</h1><p className="hero-lede">Open buckets, search across prefixes and transfer files with a native macOS app.</p><div className="hero-actions"><DownloadButton /><a className="text-link" href={asset('download/')}>Install with Homebrew <span>↗</span></a></div><p className="platform-note">macOS 15+ · Apple Silicon · MIT licensed</p></div>
-        <figure className="hero-visual"><a href={asset('screenshots/object-browser.jpg')} aria-label="View full-size S3Workbench screenshot"><img src={asset('screenshots/object-browser.jpg')} alt="S3Workbench 0.7.0 browsing studio assets with object metadata and custom headers" fetchPriority="high" width="1229" height="768" /></a><figcaption>S3Workbench 0.7.0 with a local demo bucket.</figcaption></figure>
+        <figure className="hero-visual"><a href={asset('screenshots/object-browser.jpg')} aria-label="View full-size S3Workbench screenshot"><img src={browser1229} srcSet={`${browser640} 640w, ${browser768} 768w, ${browser1229} 1229w`} sizes="(max-width: 654px) calc(100vw - 40px), 614px" alt="S3Workbench 0.7.0 browsing studio assets with object metadata and custom headers" fetchPriority="high" width="1229" height="768" /></a><figcaption>S3Workbench 0.7.0 with a local demo bucket.</figcaption></figure>
       </section>
 
       <section className="section shell" id="workflow" aria-label="What you can do">
@@ -64,7 +71,7 @@ function HomePage() {
         </div>
       </section>
 
-      <section className="search-section"><div className="shell search-layout"><div className="search-image"><a href={asset('screenshots/recursive-search.jpg')} aria-label="View full-size recursive search screenshot"><img src={asset('screenshots/recursive-search.jpg')} alt="S3Workbench displaying recursive search results and scan counters" loading="lazy" width="1229" height="768" /></a></div><div className="search-copy"><h2>Search across folders.</h2><p>Search through nested folders without opening each one. Inspect a result in place, or reveal it in its original prefix. Repeat searches use the local index.</p><a className="text-link" href={asset('screenshots/recursive-search.jpg')}>View full-size screenshot <span>↗</span></a></div></div></section>
+      <section className="search-section"><div className="shell search-layout"><div className="search-image"><a href={asset('screenshots/recursive-search.jpg')} aria-label="View full-size recursive search screenshot"><img src={search1229} srcSet={`${search640} 640w, ${search768} 768w, ${search1229} 1229w`} sizes="(max-width: 654px) calc(100vw - 40px), 614px" alt="S3Workbench displaying recursive search results and scan counters" loading="lazy" width="1229" height="768" /></a></div><div className="search-copy"><h2>Search across folders.</h2><p>Search through nested folders without opening each one. Inspect a result in place, or reveal it in its original prefix. Repeat searches use the local index.</p><a className="text-link" href={asset('screenshots/recursive-search.jpg')}>View full-size screenshot <span>↗</span></a></div></div></section>
 
       <section className="compat-strip shell"><div><h2>Connect to your S3 storage.</h2><p>MinIO, RustFS and hosted S3 endpoints, each with its own connection settings.</p></div><a className="text-link" href={asset('compatibility/')}>See compatibility <span>↗</span></a></section>
 

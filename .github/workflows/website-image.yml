@@ -64,9 +64,19 @@ jobs:
           context: ./website
           file: ./website/Dockerfile
           push: false
+          load: true
+          tags: s3workbench-site:test
           build-args: |
             VITE_SITE_URL=https://s3workbench.com
             VITE_BASE_PATH=/
+
+      - name: Check HTTP routing
+        if: github.event_name == 'pull_request'
+        run: |
+          docker run --detach --rm --name website-http-test -p 127.0.0.1:8080:80 s3workbench-site:test
+          trap 'docker stop website-http-test' EXIT
+          curl --retry 10 --retry-connrefused --retry-delay 1 --fail http://127.0.0.1:8080/healthz
+          node scripts/check-http.mjs http://127.0.0.1:8080
 
   publish:
     name: Publish website image
