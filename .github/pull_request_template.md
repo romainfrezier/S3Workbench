@@ -2,6 +2,9 @@
 
 <!-- What changed, why, and what does the user experience differently? -->
 
+- [ ] The target branch follows [Gitflow](https://github.com/romainfrezier/S3Workbench/blob/develop/CONTRIBUTING.md#gitflow).
+- [ ] For a release/hotfix: version, validation and back-merges are accounted for.
+
 ## Validation
 
 - [ ] `swift test`

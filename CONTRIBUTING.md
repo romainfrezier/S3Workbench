@@ -19,14 +19,64 @@ You need an Apple Silicon Mac, macOS 15+, Xcode 26+, Swift 6.2+, and Docker Desk
 ```sh
 git clone https://github.com/romainfrezier/S3Workbench.git
 cd S3Workbench
+git switch develop
 swift test
 scripts/integration-test.sh
 ```
 
+## Gitflow
+
+`main` contains released code; `develop` is the default integration branch.
+Use standard Git commands and pull requests; the git-flow extension is optional.
+
+| Branch | Start from | Pull request destination |
+| --- | --- | --- |
+| `feature/<issue>-<name>` | `develop` | `develop` |
+| `bugfix/<issue>-<name>` | The branch needing the fix | `develop`, `release/*` or `hotfix/*` |
+| `chore/<name>` | `develop` | `develop` |
+| `release/<version>` | `develop` | `main`, then `develop` |
+| `hotfix/<version>` | `main` | `main`, then `develop` and any open release |
+
+Dependabot and Codex branches (`dependabot/*` and `codex/*`) also target
+`develop`. They follow the same validation and release process as feature
+branches. Do not merge `develop` or a feature branch directly into `main`.
+Release and hotfix PRs into `main` must come from this repository.
+
+1. Fetch and branch from the current remote base, for example
+   `git fetch origin` followed by
+   `git switch -c feature/123-example origin/develop`.
+2. Open a PR into `develop`; wait for every applicable CI and CodeQL check on
+   the latest commit and resolve review conversations before merging.
+3. Merge with a **merge commit**. Keep merge commits for releases, hotfixes and
+   back-merges too; do not squash or rebase shared branch history.
+4. To prepare a release, create `release/<version>` from `origin/develop`.
+   Freeze features, update the changelog and finish validation on this branch.
+   Native and website versions are independent: use `release/0.8.0` for an app
+   release or `release/0.2.0-site` for a website-only release. A site-only release
+   must not accidentally include unreleased native changes from `develop`.
+5. Merge the release PR into `main`, then create the matching `v<version>` tag
+   on that exact merge commit and follow [the packaging procedure](docs/PACKAGING.md).
+   Website images publish from relevant `main` changes or `v*.*.*-site` tags;
+   integration and stabilization branches never publish images.
+6. Open the release/hotfix branch's back-merge PR into `develop` before deleting
+   it. Back-merge hotfixes into an open release too. If conflicts require a
+   separate branch, create `bugfix/<version>-backmerge` from the destination,
+   merge the release/hotfix into it, resolve conflicts and open the PR.
+   Never reset `develop` or force-push a shared branch.
+
+`main` and `develop` require a PR, the **Gitflow branch policy** check and
+resolved conversations; force pushes and deletion are disabled. The policy
+checks branch routing, not test results. Component CI and CodeQL remain scoped
+by changed paths and must be reviewed before merging. They are not globally
+required checks because a path-skipped workflow would block unrelated PRs.
+No second maintainer's approval is required for this solo-maintainer repository.
+Automatic branch deletion is disabled so release/hotfix branches survive until
+their back-merges are complete.
+
 ## Pull requests
 
 1. For planned features, work from a scoped issue and link it from the pull request.
-2. Fork the repository and create a focused branch.
+2. Fork the repository if needed and create a focused branch using the Gitflow table above.
 3. Keep the UI, domain, S3 client, credentials, persistence, and transfer boundaries intact.
 4. Add the smallest test that proves non-trivial behavior.
 5. Run:
