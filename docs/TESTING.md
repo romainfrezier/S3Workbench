@@ -1,5 +1,22 @@
 # Testing
 
+## CI scope
+
+Web changes run website validation and CodeQL for JavaScript/TypeScript and
+GitHub Actions. Native sources, package dependencies, resources, integration
+fixtures and packaging scripts run Swift tests and CodeQL Swift. Each workflow
+also runs when its own configuration changes. Documentation-only changes do not
+compile the application. Mixed changes run both sets of checks.
+
+Native release tags (`v*`, excluding `*-site`) run native packaging; website
+release tags (`v*.*.*-site`) publish only the website image. Website images are
+also published for relevant changes merged to `main`.
+
+CodeQL uses the checked-in advanced workflows; GitHub's automatic default setup
+must remain disabled to avoid duplicate scans of every language. Both CodeQL
+workflows retain weekly full scans and manual dispatch. Validate the path and
+tag routing with `ruby .github/test-workflow-triggers.rb`.
+
 ## Unit and integration tests
 
 Run unit tests with:
