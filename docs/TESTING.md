@@ -2,6 +2,12 @@
 
 ## CI scope
 
+The [Gitflow process](../CONTRIBUTING.md#gitflow) uses `main`, `develop`,
+`release/*` and `hotfix/*`. Component workflows validate pushes and PRs for
+these branches, including PR retargeting. The lightweight **Gitflow branch
+policy** check runs on every PR without path filters, including documentation
+changes. Run `ruby .github/check-gitflow.rb --test` to test its routing rules.
+
 Web changes run website validation and CodeQL for JavaScript/TypeScript and
 GitHub Actions. Native sources, package dependencies, resources, integration
 fixtures and packaging scripts run Swift tests and CodeQL Swift. Each workflow
