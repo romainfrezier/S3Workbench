@@ -62,8 +62,8 @@ registering another copy.
 
 ```sh
 APP="$PWD/.build/file-provider-poc/S3WorkbenchPOC.app"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
-pluginkit -a "$APP/Contents/PlugIns/Provider.appex"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" &&
+pluginkit -a "$APP/Contents/PlugIns/Provider.appex" &&
 "$APP/Contents/MacOS/Host" add
 ```
 
@@ -85,11 +85,13 @@ synthetic domain and registration:
 
 ```sh
 APP="$PWD/.build/file-provider-poc/S3WorkbenchPOC.app"
-"$APP/Contents/MacOS/Host" remove
-pluginkit -r "$APP/Contents/PlugIns/Provider.appex"
+"$APP/Contents/MacOS/Host" remove &&
+pluginkit -r "$APP/Contents/PlugIns/Provider.appex" &&
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP"
 ```
 
+If removal fails or times out, keep the bundle and registration in place and
+retry removal before rebuilding. The chained commands stop at the first error.
 Do not manually delete the CloudStorage directory or modify other providers.
 An ad-hoc signature working on this development machine does not establish
 the distribution requirements; signing and provisioning must be validated
