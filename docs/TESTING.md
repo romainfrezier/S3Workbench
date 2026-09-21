@@ -64,6 +64,11 @@ The shell smoke check proves the selected server fixture itself supports path-st
 
 Before release, use the app against the Compose endpoint and verify progress, cancellation, retry, download destination selection, drag and drop, Quick Look, and restart recovery. Inspect Activity Monitor while transferring a file larger than available memory to confirm memory remains bounded.
 
+Recorded application checks: [2026-09-21 native QA](qa/2026-09-21-native.md)
+covers Settings, single/multiple downloads and indexed-search interactions in
+the local Debug app, with remaining checks and packaging limitations stated
+separately.
+
 ## Provider validation evidence
 
 | Environment | Reproducible fixture | Application validation |
