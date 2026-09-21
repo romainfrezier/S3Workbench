@@ -1,0 +1,19 @@
+{
+  "sample_count": 300,
+  "started_at": "2026-09-21T20:59:26.674055+00:00",
+  "ended_at": "2026-09-21T21:00:30.039528+00:00",
+  "baseline_rss_kib": 147392,
+  "maximum_rss_kib": 163408,
+  "file_bytes": 536870912,
+  "sha256": "9acca8e8c22201155389f65abbf6bc9723edc7384ead80503839f49dcc56d767",
+  "verified_download_directories": [
+    "downloads",
+    "cancel-retry",
+    "cancel-retry-2"
+  ],
+  "pause": {
+    "time": "2026-09-21T21:03:37.149580+00:00",
+    "downloaded_bytes_when_paused": 11911168
+  },
+  "mean_sample_interval_seconds": 0.21192465886287626
+}
