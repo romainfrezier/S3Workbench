@@ -30,11 +30,11 @@ function Header({ page }: { page: Page }) {
   return <header className="site-header shell">
     <a className="brand" href={asset('')} aria-label="S3Workbench home"><Logo /><span>S3Workbench</span></a>
     <nav aria-label="Main navigation">
-      <a className={page === 'compatibility' ? 'active' : ''} href={asset('compatibility/')}>Compatibility</a>
-      <a className={page === 'security' ? 'active' : ''} href={asset('security/')}>Security</a>
-      <a href={githubUrl} target="_blank" rel="noreferrer">GitHub ↗</a>
+      <a aria-current={page === 'compatibility' ? 'page' : undefined} href={asset('compatibility/')}>Compatibility</a>
+      <a aria-current={page === 'security' ? 'page' : undefined} href={asset('security/')}>Security</a>
+      <a href={githubUrl} target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
-    <a className="button button-small button-cyan" href={asset('download/')}>Download</a>
+    <a className="button button-small button-cyan" href={asset('download/')} aria-current={page === 'download' ? 'page' : undefined}>Download</a>
   </header>
 }
 
@@ -42,12 +42,12 @@ function Footer() {
   return <footer className="site-footer shell">
     <div className="footer-brand"><Logo /><span>S3Workbench</span></div>
     <p>A native macOS browser for S3-compatible object storage.</p>
-    <div className="footer-links"><a href={asset('download/')}>Download</a><a href={githubUrl} target="_blank" rel="noreferrer">GitHub ↗</a><a className="support-link" href={supportUrl} target="_blank" rel="noreferrer">Support the project ↗</a><span>MIT License</span></div>
+    <div className="footer-links"><a href={asset('download/')}>Download</a><a href={githubUrl} target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a><a className="support-link" href={supportUrl} target="_blank" rel="noreferrer">Support the project <span aria-hidden="true">↗</span></a><span>MIT License</span></div>
   </footer>
 }
 
 function DownloadButton() {
-  return <a className="button button-cyan" href={releaseUrl} target="_blank" rel="noreferrer">Download for macOS <span>↗</span></a>
+  return <a className="button button-cyan" href={releaseUrl} target="_blank" rel="noreferrer">Download for macOS <span aria-hidden="true">↗</span></a>
 }
 
 function FeatureCard({ title, body }: { title: string; body: string }) {
@@ -56,10 +56,10 @@ function FeatureCard({ title, body }: { title: string; body: string }) {
 
 function HomePage() {
   return <>
-    <main>
+    <main id="main-content" tabIndex={-1}>
       <section className="hero shell">
-        <div className="hero-copy"><h1>Browse S3<br />from your Mac.</h1><p className="hero-lede">Open buckets, search across prefixes and transfer files with a native macOS app.</p><div className="hero-actions"><DownloadButton /><a className="text-link" href={asset('download/')}>Install with Homebrew <span>↗</span></a></div><p className="platform-note">macOS 15+ · Apple Silicon · MIT licensed</p></div>
-        <figure className="hero-visual"><a href={asset('screenshots/object-browser.jpg')} aria-label="View full-size S3Workbench screenshot"><img src={browser1229} srcSet={`${browser640} 640w, ${browser768} 768w, ${browser1229} 1229w`} sizes="(max-width: 654px) calc(100vw - 40px), 614px" alt="S3Workbench 0.7.0 browsing studio assets with object metadata and custom headers" fetchPriority="high" width="1229" height="768" /></a><figcaption>S3Workbench 0.7.0 with a local demo bucket.</figcaption></figure>
+        <div className="hero-copy"><h1>Browse S3<br />from your Mac.</h1><p className="hero-lede">Open buckets, search across prefixes and transfer files with a native macOS app.</p><div className="hero-actions"><DownloadButton /><a className="text-link" href={asset('download/#homebrew')}>Install with Homebrew</a></div><p className="platform-note">macOS 15+ · Apple Silicon · MIT licensed</p></div>
+        <figure className="hero-visual"><a href={asset('screenshots/object-browser.jpg')} aria-label="View full-size S3Workbench screenshot"><img src={browser1229} srcSet={`${browser640} 640w, ${browser768} 768w, ${browser1229} 1229w`} sizes="(max-width: 654px) calc(100vw - 40px), (max-width: 1050px) 614px, (max-width: 1244px) calc((100vw - 112px) * 0.55), 614px" alt="S3Workbench 0.7.0 browsing studio assets with object metadata and custom headers" fetchPriority="high" width="1229" height="768" /></a><figcaption>S3Workbench 0.7.0 with a local demo bucket.</figcaption></figure>
       </section>
 
       <section className="section shell" id="workflow" aria-label="What you can do">
@@ -70,11 +70,11 @@ function HomePage() {
         </div>
       </section>
 
-      <section className="search-section"><div className="shell search-layout"><div className="search-image"><a href={asset('screenshots/recursive-search.jpg')} aria-label="View full-size recursive search screenshot"><img src={search1229} srcSet={`${search640} 640w, ${search768} 768w, ${search1229} 1229w`} sizes="(max-width: 654px) calc(100vw - 40px), 614px" alt="S3Workbench displaying recursive search results and scan counters" loading="lazy" width="1229" height="768" /></a></div><div className="search-copy"><h2>Search across folders.</h2><p>Search through nested folders without opening each one. Inspect a result in place, or reveal it in its original prefix. Repeat searches use the local index.</p><a className="text-link" href={asset('screenshots/recursive-search.jpg')}>View full-size screenshot <span>↗</span></a></div></div></section>
+      <section className="search-section"><div className="shell search-layout"><div className="search-copy"><h2>Search across folders.</h2><p>Search through nested folders without opening each one. Inspect a result in place, or reveal it in its original prefix. Repeat searches use the local index.</p><a className="text-link" href={asset('screenshots/recursive-search.jpg')}>View full-size screenshot <span aria-hidden="true">↗</span></a></div><div className="search-image"><a href={asset('screenshots/recursive-search.jpg')} aria-label="View full-size recursive search screenshot"><img src={search1229} srcSet={`${search640} 640w, ${search768} 768w, ${search1229} 1229w`} sizes="(max-width: 654px) calc(100vw - 40px), (max-width: 1050px) 614px, (max-width: 1244px) calc((100vw - 112px) * 0.55), 614px" alt="S3Workbench displaying recursive search results and scan counters" loading="lazy" width="1229" height="768" /></a></div></div></section>
 
-      <section className="compat-strip shell"><div><h2>Connect to your S3 storage.</h2><p>MinIO, RustFS and hosted S3 endpoints, each with its own connection settings.</p></div><a className="text-link" href={asset('compatibility/')}>See compatibility <span>↗</span></a></section>
+      <section className="compat-strip shell"><div><h2>Connect to your S3 storage.</h2><p>MinIO, RustFS and hosted S3 endpoints, each with its own connection settings.</p></div><a className="text-link" href={asset('compatibility/')}>See compatibility</a></section>
 
-      <section className="download-band"><div className="shell download-inner"><div><h2>Download S3Workbench</h2><p>Free and open source. macOS 15+ on Apple Silicon.</p></div><div className="download-actions"><DownloadButton /><a className="text-link" href={asset('download/')}>Installation guide <span>↗</span></a></div></div></section>
+      <section className="download-band"><div className="shell download-inner"><div><h2>Download S3Workbench</h2><p>Free and open source. macOS 15+ on Apple Silicon.</p></div><div className="download-actions"><DownloadButton /><a className="text-link" href={asset('download/')}>Installation guide</a></div></div></section>
     </main>
   </>
 }
@@ -87,7 +87,7 @@ const pageContent: Record<Exclude<Page, 'home'>, { title: string; intro: string;
 
 function InformationPage({ page }: { page: Exclude<Page, 'home'> }) {
   const content = pageContent[page]
-  return <main className="info-page shell"><h1>{content.title}</h1><p className="info-lede">{content.intro}</p><div className="info-list">{content.sections.map((section, index) => <article className="info-item" key={section.title}><div><h2>{section.title}</h2><p>{section.body}</p>{page === 'download' && index === 1 && <pre className="install-command"><code>{'brew tap romainfrezier/s3workbench\nbrew trust --cask romainfrezier/s3workbench/s3-workbench\nbrew install --cask s3-workbench'}</code></pre>}{page === 'download' && index === 2 && <a className="text-link" href={githubUrl} target="_blank" rel="noreferrer">Open GitHub <span>↗</span></a>}</div></article>)}</div>{page === 'compatibility' && <p className="evidence-note">See the <a href={`${githubUrl}/blob/main/docs/TESTING.md`}>integration coverage and provider validation notes</a> for tested versions, operations and setup details.</p>}<div className="info-actions"><DownloadButton /><a className="text-link" href={asset('')}>Back to home <span>↗</span></a></div></main>
+  return <main id="main-content" tabIndex={-1} className="info-page shell"><h1>{content.title}</h1><p className="info-lede">{content.intro}</p>{page === 'download' && <div className="install-actions"><DownloadButton /><a className="text-link" href="#homebrew">Install with Homebrew</a></div>}<div className="info-list">{content.sections.map((section, index) => <article className="info-item" id={page === 'download' && index === 1 ? 'homebrew' : undefined} key={section.title}><div><h2>{section.title}</h2><p>{section.body}</p>{page === 'download' && index === 1 && <pre className="install-command" tabIndex={0} role="region" aria-label="Homebrew installation commands"><code>{'brew tap romainfrezier/s3workbench\nbrew trust --cask romainfrezier/s3workbench/s3-workbench\nbrew install --cask s3-workbench'}</code></pre>}{page === 'download' && index === 2 && <a className="text-link" href={githubUrl} target="_blank" rel="noreferrer">Open GitHub <span aria-hidden="true">↗</span></a>}</div></article>)}</div>{page === 'compatibility' && <p className="evidence-note">See the <a href={`${githubUrl}/blob/main/docs/TESTING.md`}>integration coverage and provider validation notes</a> for tested versions, operations and setup details.</p>}<div className="info-actions"><DownloadButton /><a className="text-link" href={asset('')}>Back to home</a></div></main>
 }
 
 function StructuredData({ page }: { page: Page }) {
@@ -97,5 +97,5 @@ function StructuredData({ page }: { page: Page }) {
 
 export default function App({ pathname }: { pathname?: string }) {
   const page = pageFromPath(pathname ?? (typeof window === 'undefined' ? '/' : window.location.pathname))
-  return <><Header page={page} /><StructuredData page={page} />{page === 'home' ? <HomePage /> : <InformationPage page={page} />}<Footer /></>
+  return <><a className="skip-link" href="#main-content">Skip to content</a><Header page={page} /><StructuredData page={page} />{page === 'home' ? <HomePage /> : <InformationPage page={page} />}<Footer /></>
 }
