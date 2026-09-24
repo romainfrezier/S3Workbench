@@ -16,6 +16,12 @@ for (const route of routes) {
   if (!html.includes('<meta name="description"')) throw new Error(`${route}: missing description`)
   if (!html.includes('<script type="application/ld+json">')) throw new Error(`${route}: missing structured data`)
   if (/<script\b[^>]*\bsrc=/.test(html)) throw new Error(`${route}: unnecessary client JavaScript`)
+  if (!html.includes('href="#main-content"') || !/<main[^>]*id="main-content"[^>]*tabindex="-1"/.test(html)) throw new Error(`${route}: missing keyboard skip target`)
+  if (route !== '/') {
+    const current = html.match(/<a[^>]*aria-current="page"[^>]*>/g)
+    if (current?.length !== 1 || !current[0].includes(`href="${route}"`)) throw new Error(`${route}: incorrect current-page navigation`)
+  }
+  if (route === '/download/' && (!html.includes('id="homebrew"') || !/<pre[^>]*tabindex="0"[^>]*aria-label="Homebrew installation commands"/.test(html))) throw new Error('download: missing accessible Homebrew instructions')
   if (!html.includes('<h1')) throw new Error(`${route}: missing prerendered content`)
   if (/<link[^>]*rel="stylesheet"/.test(html)) throw new Error(`${route}: render-blocking stylesheet`)
   const css = html.match(/<style>([\s\S]*?)<\/style>/)?.[1]
@@ -24,6 +30,7 @@ for (const route of routes) {
   if (!logo) throw new Error(`${route}: missing lightweight logo`)
   if ((await readFile(join(dist, logo[1]))).length > 10_000) throw new Error(`${route}: oversized logo`)
   if (route === '/') {
+    if (!html.includes('href="/download/#homebrew"')) throw new Error('home: Homebrew link must target installation instructions')
     const screenshots = html.match(/<img[^>]*srcSet="[^"]*\.webp[^>]*sizes="[^"]+"/g)
     if (screenshots?.length !== 2) throw new Error('home: missing responsive screenshots')
   }
