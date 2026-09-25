@@ -308,16 +308,21 @@ public actor AWSS3Service: S3Service {
                     progress?(TransferProgress(bytesTransferred: written, totalBytes: total))
                 }
             case .stream(let stream):
-                while let chunk = try await stream.readAsync(upToCount: 1_024 * 1_024), !chunk.isEmpty {
-                    try Task.checkCancellation()
-                    try handle.write(contentsOf: chunk)
-                    written += Int64(chunk.count)
-                    progress?(TransferProgress(bytesTransferred: written, totalBytes: total))
+                defer { stream.close() }
+                try await withTaskCancellationHandler {
+                    while let chunk = try await stream.readAsync(upToCount: 1_024 * 1_024), !chunk.isEmpty {
+                        try Task.checkCancellation()
+                        try handle.write(contentsOf: chunk)
+                        written += Int64(chunk.count)
+                        progress?(TransferProgress(bytesTransferred: written, totalBytes: total))
+                    }
+                } onCancel: {
+                    stream.close()
                 }
-                stream.close()
             case .noStream:
                 throw S3ServiceError.service("The server returned an empty download body.")
             }
+            try Task.checkCancellation()
         }
         try handle.synchronize()
         try handle.close()
