@@ -67,7 +67,9 @@ Before release, use the app against the Compose endpoint and verify progress, ca
 Recorded application checks: [2026-09-21 native QA](qa/2026-09-21-native.md)
 covers Settings, single/multiple downloads and indexed-search interactions in
 the local Debug app, with remaining checks and packaging limitations stated
-separately.
+separately. The [2026-09-22 command follow-up](qa/2026-09-22-native-commands.md)
+adds menu enablement, cancelled confirmation/destination flows, Quick Look and
+active-scene routing checks.
 
 ## Provider validation evidence
 
