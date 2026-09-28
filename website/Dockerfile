@@ -12,7 +12,7 @@ ENV VITE_BASE_PATH=$VITE_BASE_PATH
 
 RUN npm run build
 
-FROM nginx:1.29.8-alpine
+FROM nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
 
 COPY --from=build /site/dist-server/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /site/dist /usr/share/nginx/html
